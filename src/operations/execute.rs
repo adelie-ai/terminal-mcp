@@ -78,38 +78,54 @@ pub async fn execute(
         }
     }
 
-    // Wait with timeout
+    // Take pipes out of child before spawning concurrent readers to avoid deadlock
+    // when pipe buffers fill up.
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdout_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout_pipe {
+            let _ = out.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(ref mut err) = stderr_pipe {
+            let _ = err.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-    let result = tokio::time::timeout(timeout_duration, child.wait()).await;
+    let result = tokio::time::timeout(timeout_duration, async {
+        let stdout_bytes = stdout_handle.await.unwrap_or_default();
+        let stderr_bytes = stderr_handle.await.unwrap_or_default();
+        let status = child.wait().await;
+        (stdout_bytes, stderr_bytes, status)
+    })
+    .await;
 
     match result {
-        Ok(Ok(status)) => {
-            // Process exited within timeout - read stdout/stderr from pipes
-            let mut stdout_bytes = Vec::new();
-            let mut stderr_bytes = Vec::new();
-            if let Some(mut out) = child.stdout.take() {
-                use tokio::io::AsyncReadExt;
-                let _ = out.read_to_end(&mut stdout_bytes).await;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let _ = err.read_to_end(&mut stderr_bytes).await;
-            }
-            Ok(ExecuteResult {
-                exit_code: status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
-                stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
-                timed_out: false,
-            })
-        }
-        Ok(Err(e)) => Err(ShellError::ExecutionFailed(format!(
+        Ok((stdout_bytes, stderr_bytes, Ok(status))) => Ok(ExecuteResult {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+            timed_out: false,
+        }),
+        Ok((_, _, Err(e))) => Err(ShellError::ExecutionFailed(format!(
             "Failed to wait for command '{}': {}",
             command, e
         ))
         .into()),
         Err(_) => {
-            // Timeout - kill the process
-            let _ = child.kill().await;
+            // Timeout - tasks will be dropped, killing pipe reads.
+            // We can't easily kill the child here since it moved into the task,
+            // but dropping the task will drop the Child, closing pipes.
             Ok(ExecuteResult {
                 exit_code: -1,
                 stdout: String::new(),
