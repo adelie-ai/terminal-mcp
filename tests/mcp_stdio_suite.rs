@@ -320,3 +320,55 @@ fn terminal_execute_tool_not_found() {
         expect_err_contains(res, "not found");
     });
 }
+
+#[test]
+fn terminal_execute_max_lines_truncation() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "sh", "args": ["-c", "for i in $(seq 1 10); do echo line$i; done"], "max_lines": 3}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(true));
+        let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap();
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "line8");
+        assert_eq!(lines[2], "line10");
+    });
+}
+
+#[test]
+fn terminal_execute_max_lines_default_not_truncated() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "echo", "args": ["hello"]}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(v.get("stderr_truncated").and_then(|x| x.as_bool()), Some(false));
+    });
+}
+
+#[test]
+fn terminal_execute_max_lines_zero_unlimited() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "sh", "args": ["-c", "for i in $(seq 1 300); do echo line$i; done"], "max_lines": 0}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(false));
+        let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap();
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 300);
+    });
+}

@@ -45,6 +45,10 @@ impl ToolRegistry {
                         "stdin": {
                             "type": "string",
                             "description": "Input to send to the process's stdin. The stdin will be closed after writing this input."
+                        },
+                        "max_lines": {
+                            "type": "number",
+                            "description": "Maximum number of lines to return for stdout and stderr (keeps the last N lines, like tail). Default: 200. Set to 0 for unlimited output. Applied independently to stdout and stderr."
                         }
                     },
                     "required": ["command"]
@@ -84,12 +88,18 @@ impl ToolRegistry {
 
                 let stdin_input = args.get("stdin").and_then(|v| v.as_str());
 
+                let max_lines = args
+                    .get("max_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+
                 let result = crate::operations::execute::execute(
                     command,
                     cmd_args.as_deref(),
                     cwd,
                     timeout_secs,
                     stdin_input,
+                    max_lines,
                 )
                 .await?;
 
@@ -101,6 +111,8 @@ impl ToolRegistry {
                             "stdout": result.stdout,
                             "stderr": result.stderr,
                             "timed_out": result.timed_out,
+                            "stdout_truncated": result.stdout_truncated,
+                            "stderr_truncated": result.stderr_truncated,
                         }
                     }]
                 }))

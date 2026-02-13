@@ -13,7 +13,23 @@ pub struct ExecuteResult {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
+
+/// Keep the last `max_lines` lines of output. Returns (truncated_string, was_truncated).
+fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= max_lines {
+        (s.to_string(), false)
+    } else {
+        let kept = &lines[lines.len() - max_lines..];
+        (kept.join("\n") + "\n", true)
+    }
+}
+
+/// Default maximum lines returned for stdout/stderr.
+pub const DEFAULT_MAX_LINES: usize = 200;
 
 pub async fn execute(
     command: &str,
@@ -21,6 +37,7 @@ pub async fn execute(
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
     stdin_input: Option<&str>,
+    max_lines: Option<usize>,
 ) -> Result<ExecuteResult> {
     if command.is_empty() {
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
@@ -110,13 +127,31 @@ pub async fn execute(
     })
     .await;
 
+    let max_lines = max_lines.unwrap_or(DEFAULT_MAX_LINES);
+
     match result {
-        Ok((stdout_bytes, stderr_bytes, Ok(status))) => Ok(ExecuteResult {
-            exit_code: status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
-            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
-            timed_out: false,
-        }),
+        Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
+            let raw_stdout = String::from_utf8_lossy(&stdout_bytes);
+            let raw_stderr = String::from_utf8_lossy(&stderr_bytes);
+            let (stdout, stdout_truncated) = if max_lines == 0 {
+                (raw_stdout.to_string(), false)
+            } else {
+                tail_lines(&raw_stdout, max_lines)
+            };
+            let (stderr, stderr_truncated) = if max_lines == 0 {
+                (raw_stderr.to_string(), false)
+            } else {
+                tail_lines(&raw_stderr, max_lines)
+            };
+            Ok(ExecuteResult {
+                exit_code: status.code().unwrap_or(-1),
+                stdout,
+                stderr,
+                timed_out: false,
+                stdout_truncated,
+                stderr_truncated,
+            })
+        }
         Ok((_, _, Err(e))) => Err(ShellError::ExecutionFailed(format!(
             "Failed to wait for command '{}': {}",
             command, e
@@ -131,6 +166,8 @@ pub async fn execute(
                 stdout: String::new(),
                 stderr: format!("Command timed out after {} seconds", timeout_secs),
                 timed_out: true,
+                stdout_truncated: false,
+                stderr_truncated: false,
             })
         }
     }
@@ -142,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_execution() {
-        let result = execute("echo", Some(&["hello".to_string()]), None, None, None)
+        let result = execute("echo", Some(&["hello".to_string()]), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -159,6 +196,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -169,14 +207,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_zero_exit_code() {
-        let result = execute("false", None, None, None, None).await.unwrap();
+        let result = execute("false", None, None, None, None, None).await.unwrap();
         assert_ne!(result.exit_code, 0);
         assert!(!result.timed_out);
     }
 
     #[tokio::test]
     async fn test_timeout() {
-        let result = execute("sleep", Some(&["10".to_string()]), None, Some(1), None)
+        let result = execute("sleep", Some(&["10".to_string()]), None, Some(1), None, None)
             .await
             .unwrap();
         assert!(result.timed_out);
@@ -185,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_cwd() {
-        let result = execute("pwd", None, Some("/tmp"), None, None)
+        let result = execute("pwd", None, Some("/tmp"), None, None, None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -194,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let result = execute("nonexistent_command_xyz_12345", None, None, None, None).await;
+        let result = execute("nonexistent_command_xyz_12345", None, None, None, None, None).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("not found") || err.contains("Command not found"));
@@ -202,13 +240,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command() {
-        let result = execute("", None, None, None, None).await;
+        let result = execute("", None, None, None, None, None).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_stdin_piping() {
-        let result = execute("cat", None, None, None, Some("hello from stdin"))
+        let result = execute("cat", None, None, None, Some("hello from stdin"), None)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -223,8 +261,57 @@ mod tests {
             Some("/nonexistent_dir_xyz"),
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_max_lines_truncation() {
+        // Generate 10 lines, keep last 3
+        let result = execute(
+            "sh",
+            Some(&["-c".to_string(), "for i in $(seq 1 10); do echo line$i; done".to_string()]),
+            None,
+            None,
+            None,
+            Some(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout_truncated);
+        let lines: Vec<&str> = result.stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "line8");
+        assert_eq!(lines[2], "line10");
+    }
+
+    #[tokio::test]
+    async fn test_max_lines_no_truncation_when_under() {
+        let result = execute("echo", Some(&["hello".to_string()]), None, None, None, Some(5))
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.stdout_truncated);
+        assert_eq!(result.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_max_lines_zero_means_unlimited() {
+        let result = execute(
+            "sh",
+            Some(&["-c".to_string(), "for i in $(seq 1 10); do echo line$i; done".to_string()]),
+            None,
+            None,
+            None,
+            Some(0),
+        )
+        .await
+        .unwrap();
+        assert!(!result.stdout_truncated);
+        let lines: Vec<&str> = result.stdout.trim().lines().collect();
+        assert_eq!(lines.len(), 10);
     }
 }
