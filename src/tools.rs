@@ -1,8 +1,10 @@
 #![deny(warnings)]
 
-// Tool registry and MCP tool definitions
+// Tool registry and MCP tool definitions.
 
 use crate::error::{McpError, Result, ScriptError};
+use crate::operations::audit::AuditLogger;
+use crate::operations::execute::ExecuteResult;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,20 +35,27 @@ const BUILTIN_TOOLS: &[&str] = &[
     "terminal_list_scripts",
 ];
 
-/// Tool registry that manages all available tools
+/// Registry for built-in and dynamic MCP tools.
 pub struct ToolRegistry {
     scripts: Arc<RwLock<HashMap<String, StoredScript>>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl ToolRegistry {
-    /// Create a new tool registry
+    /// Create a new registry with audit logging disabled.
     pub fn new() -> Self {
+        Self::new_with_audit(None)
+    }
+
+    /// Create a new registry with optional audit logging.
+    pub fn new_with_audit(audit_logger: Option<Arc<AuditLogger>>) -> Self {
         Self {
             scripts: Arc::new(RwLock::new(HashMap::new())),
+            audit_logger,
         }
     }
 
-    /// Get all tools in MCP format
+    /// List available tools in MCP schema format.
     pub async fn list_tools(&self) -> Value {
         let mut tools = vec![
             terminal_execute_schema(),
@@ -63,7 +72,7 @@ impl ToolRegistry {
         Value::Array(tools)
     }
 
-    /// Execute a tool by name. Returns (result_value, tools_changed).
+    /// Execute a tool by name and return `(result_value, tools_changed)`.
     pub async fn execute_tool(&self, name: &str, arguments: &Value) -> Result<(Value, bool)> {
         let args = arguments.as_object().ok_or_else(|| {
             McpError::InvalidToolParameters("Arguments must be an object".to_string())
@@ -87,7 +96,6 @@ impl ToolRegistry {
                 Ok((result, false))
             }
             _ => {
-                // Check for dynamic script tool: script_<name>
                 if let Some(script_name) = name.strip_prefix("script_") {
                     let result = self.exec_dynamic_script(script_name, args).await?;
                     Ok((result, false))
@@ -119,7 +127,7 @@ impl ToolRegistry {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
 
-        let result = if let Some(script_body) = script {
+        let (result, command_desc) = if let Some(script_body) = script {
             let cmd_args: Option<Vec<String>> = args.get("args").and_then(|v| {
                 v.as_array().map(|arr| {
                     arr.iter()
@@ -128,7 +136,7 @@ impl ToolRegistry {
                 })
             });
 
-            crate::operations::execute::execute_script(
+            let result = crate::operations::execute::execute_script(
                 script_body,
                 cmd_args.as_deref(),
                 cwd,
@@ -136,7 +144,16 @@ impl ToolRegistry {
                 max_lines,
                 None,
             )
-            .await?
+            .await?;
+
+            let command_desc = match cmd_args {
+                Some(values) if !values.is_empty() => {
+                    format!("script args=[{}]", values.join(" "))
+                }
+                _ => "script".to_string(),
+            };
+
+            (result, command_desc)
         } else {
             let command =
                 args.get("command")
@@ -155,7 +172,7 @@ impl ToolRegistry {
                 })
             });
 
-            crate::operations::execute::execute(
+            let result = crate::operations::execute::execute(
                 command,
                 cmd_args.as_deref(),
                 cwd,
@@ -163,10 +180,23 @@ impl ToolRegistry {
                 stdin_input,
                 max_lines,
             )
-            .await?
+            .await?;
+
+            let command_desc = match cmd_args {
+                Some(values) if !values.is_empty() => {
+                    format!("{} {}", command, values.join(" "))
+                }
+                _ => command.to_string(),
+            };
+
+            (result, command_desc)
         };
 
-        Ok(execution_result_json(&result))
+        let audit_log_file = self.audit_logger.as_ref().map(|logger| {
+            logger.log_command(&command_desc, cwd, &result)
+        });
+
+        Ok(execution_result_json(&result, audit_log_file.as_deref()))
     }
 
     async fn exec_store_script(
@@ -316,7 +346,13 @@ impl ToolRegistry {
         )
         .await?;
 
-        Ok(execution_result_json(&result))
+        let command_desc = format!("script_{}", stored.name);
+        let audit_log_file = self
+            .audit_logger
+            .as_ref()
+            .map(|logger| logger.log_command(&command_desc, cwd, &result));
+
+        Ok(execution_result_json(&result, audit_log_file.as_deref()))
     }
 }
 
@@ -326,18 +362,24 @@ impl Default for ToolRegistry {
     }
 }
 
-fn execution_result_json(result: &crate::operations::execute::ExecuteResult) -> Value {
+fn execution_result_json(result: &ExecuteResult, audit_log_file: Option<&str>) -> Value {
+    let mut value = serde_json::json!({
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "timed_out": result.timed_out,
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+    });
+
+    if let Some(filename) = audit_log_file {
+        value["audit_log_file"] = Value::String(filename.to_string());
+    }
+
     serde_json::json!({
         "content": [{
             "type": "json",
-            "value": {
-                "exit_code": result.exit_code,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "timed_out": result.timed_out,
-                "stdout_truncated": result.stdout_truncated,
-                "stderr_truncated": result.stderr_truncated,
-            }
+            "value": value
         }]
     })
 }

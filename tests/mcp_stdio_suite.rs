@@ -1,7 +1,9 @@
 #![deny(warnings)]
 
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 struct McpStdioClient {
     child: Child,
@@ -14,13 +16,24 @@ struct McpStdioClient {
 
 impl McpStdioClient {
     fn start() -> Self {
+        Self::start_with_log_dir(None)
+    }
+
+    fn start_with_log_dir(log_dir: Option<&Path>) -> Self {
         let exe = env!("CARGO_BIN_EXE_terminal-mcp");
 
-        let mut child = Command::new(exe)
+        let mut command = Command::new(exe);
+        command
             .args(["serve", "--mode", "stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        if let Some(dir) = log_dir {
+            command.env("MCP_TERMINAL_LOG_DIR", dir);
+        }
+
+        let mut child = command
             .spawn()
             .expect("spawn terminal-mcp serve --mode stdio");
 
@@ -827,5 +840,81 @@ fn builtin_tools_present_in_list() {
         assert!(names.contains(&"terminal_store_script"));
         assert!(names.contains(&"terminal_remove_script"));
         assert!(names.contains(&"terminal_list_scripts"));
+    });
+}
+
+#[test]
+fn audit_logging_writes_session_and_command_logs() {
+    let temp = tempfile::tempdir().expect("tempdir for audit logs");
+
+    let mut client = McpStdioClient::start_with_log_dir(Some(temp.path()));
+    client.initialize();
+
+    let command_stdout = "hello_audit_integration";
+    let res = client
+        .tool_call(
+            "terminal_execute",
+            json!({"command": "echo", "args": [command_stdout]}),
+        )
+        .expect("terminal_execute with audit logging");
+
+    let value = extract_value(&res);
+    let log_file = value
+        .get("audit_log_file")
+        .and_then(|v| v.as_str())
+        .expect("result should include audit_log_file when logging is enabled");
+
+    let entries: Vec<_> = fs::read_dir(temp.path())
+        .expect("read log dir")
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let session_logs: Vec<_> = entries
+        .iter()
+        .filter(|e| e.file_name().to_string_lossy().ends_with("_session.log"))
+        .collect();
+    assert_eq!(session_logs.len(), 1, "expected one session log");
+
+    let command_logs: Vec<_> = entries
+        .iter()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".log"))
+        .filter(|e| !e.file_name().to_string_lossy().ends_with("_session.log"))
+        .collect();
+    assert_eq!(command_logs.len(), 1, "expected one command log");
+
+    let command_log_name = command_logs[0].file_name().to_string_lossy().to_string();
+    assert_eq!(command_log_name, log_file, "tool result should reference command log filename");
+
+    let session_content = fs::read_to_string(session_logs[0].path()).expect("read session log");
+    assert!(session_content.contains("TOOL terminal_execute"));
+    assert!(session_content.contains("RESULT terminal_execute ok"));
+    assert!(session_content.contains(log_file));
+    assert!(
+        !session_content.contains("--- stdout ---") && !session_content.contains("--- stderr ---"),
+        "session log should stay metadata-only and not include command output sections"
+    );
+
+    let command_content = fs::read_to_string(command_logs[0].path()).expect("read command log");
+    assert!(command_content.contains("$ echo hello_audit_integration"));
+    assert!(command_content.contains("--- stdout ---"));
+    assert!(command_content.contains(command_stdout));
+    assert!(command_content.contains("--- stderr ---"));
+}
+
+#[test]
+fn audit_logging_disabled_omits_audit_log_file() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "echo", "args": ["no_audit"]}),
+            )
+            .unwrap();
+
+        let value = extract_value(&res);
+        assert!(
+            value.get("audit_log_file").is_none(),
+            "audit_log_file should be absent when MCP_TERMINAL_LOG_DIR is unset"
+        );
     });
 }

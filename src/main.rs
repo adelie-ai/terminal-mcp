@@ -68,7 +68,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Serve { mode, port, host } => {
-            // Create server
             let server = McpServer::new();
 
             match mode {
@@ -81,12 +80,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Run the MCP server over stdio using auto-detected framing.
 async fn run_stdio_server(server: McpServer) -> Result<()> {
     let server = Arc::new(server);
     let mut transport = StdioTransportHandler::new();
 
     loop {
-        // Read JSON-RPC message from stdin
         let message_str = match transport.read_message().await {
             Ok(msg) => msg,
             Err(e) => {
@@ -99,12 +98,10 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             continue;
         }
 
-        // Parse JSON-RPC message
         let message: Value = match serde_json::from_str(&message_str) {
             Ok(msg) => msg,
             Err(e) => {
                 eprintln!("Error parsing JSON-RPC message: {}", e);
-                // Send parse error response
                 let error_response = jsonrpc_error_response(None, -32700, "Parse error", None);
                 if let Ok(resp_str) = serde_json::to_string(&error_response) {
                     let _ = transport.write_message(&resp_str).await;
@@ -113,11 +110,9 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             }
         };
 
-        // Handle message and get response + notifications
         let (response, notifications) =
             handle_jsonrpc_message(Arc::clone(&server), message).await;
 
-        // Send response if present (notifications don't have responses)
         if let Some(resp) = response {
             let resp_str = match serde_json::to_string(&resp) {
                 Ok(s) => s,
@@ -132,7 +127,6 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             }
         }
 
-        // Send any notifications
         for notif in notifications {
             if let Ok(notif_str) = serde_json::to_string(&notif) {
                 if let Err(e) = transport.write_message(&notif_str).await {
@@ -146,6 +140,7 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
     Ok(())
 }
 
+/// Run the MCP server over WebSocket at `ws://{host}:{port}/ws`.
 async fn run_websocket_server(server: McpServer, host: &str, port: u16) -> Result<()> {
     let server = Arc::new(server);
 
@@ -165,6 +160,7 @@ async fn websocket_handler(ws: WebSocketUpgrade, State(server): State<Arc<McpSer
     ws.on_upgrade(move |socket| handle_websocket_connection(socket, server))
 }
 
+/// Handle one WebSocket client session until close/error.
 async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, server: Arc<McpServer>) {
     use axum::extract::ws::Message;
     use futures_util::{SinkExt, StreamExt};
@@ -174,7 +170,6 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                // Parse JSON-RPC message
                 let message: Value = match serde_json::from_str(&text) {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -188,11 +183,9 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
                     }
                 };
 
-                // Handle message and get response + notifications
                 let (response, notifications) =
                     handle_jsonrpc_message(Arc::clone(&server), message).await;
 
-                // Send response if present
                 if let Some(resp) = response {
                     if let Ok(resp_str) = serde_json::to_string(&resp) {
                         if let Err(e) = sender.send(Message::Text(resp_str.into())).await {
@@ -202,7 +195,6 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
                     }
                 }
 
-                // Send any notifications
                 for notif in notifications {
                     if let Ok(notif_str) = serde_json::to_string(&notif) {
                         if let Err(e) = sender.send(Message::Text(notif_str.into())).await {
@@ -229,7 +221,6 @@ async fn handle_jsonrpc_message(
     server: Arc<McpServer>,
     message: Value,
 ) -> (Option<Value>, Vec<Value>) {
-    // Validate JSON-RPC version (if present)
     if let Some(jsonrpc_version) = message.get("jsonrpc").and_then(|v| v.as_str()) {
         if jsonrpc_version != "2.0" {
             let id = message.get("id").cloned();
@@ -241,17 +232,14 @@ async fn handle_jsonrpc_message(
         }
     }
 
-    // Extract JSON-RPC fields
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(|m| m.as_str());
     let params = message.get("params").cloned().unwrap_or(Value::Null);
 
-    // Check if this is a notification (no id) or request (has id)
     let is_notification = id.is_none();
 
     let mut notifications = Vec::new();
 
-    // Handle different MCP methods
     let result = match method {
         Some("initialize") => {
             let protocol_version = params
@@ -275,7 +263,6 @@ async fn handle_jsonrpc_message(
             }
         }
         Some("tools/list") => {
-            // Check if server is initialized
             if !server.is_initialized().await {
                 return (
                     Some(jsonrpc_error_response(
@@ -291,7 +278,6 @@ async fn handle_jsonrpc_message(
             Ok(serde_json::json!({ "tools": server.list_tools().await }))
         }
         Some("tools/call") => {
-            // Check if server is initialized
             if !server.is_initialized().await {
                 return (
                     Some(jsonrpc_error_response(
@@ -321,7 +307,6 @@ async fn handle_jsonrpc_message(
                     Err(e) => Err(e),
                 }
             } else {
-                // Invalid params - JSON-RPC 2.0 error code -32602
                 return (
                     Some(jsonrpc_error_response(
                         id,
@@ -334,7 +319,6 @@ async fn handle_jsonrpc_message(
             }
         }
         Some("shutdown") => {
-            // Check if server is initialized
             if !server.is_initialized().await {
                 return (
                     Some(jsonrpc_error_response(
@@ -353,7 +337,6 @@ async fn handle_jsonrpc_message(
             }
         }
         Some(_) | None => {
-            // Method not found - JSON-RPC 2.0 error code -32601
             return (
                 Some(jsonrpc_error_response(
                     id,
@@ -366,14 +349,11 @@ async fn handle_jsonrpc_message(
         }
     };
 
-    // Build response
     match result {
         Ok(result_value) => {
             if is_notification {
-                // Notifications don't get responses
                 (None, notifications)
             } else {
-                // Build success response
                 (
                     Some(serde_json::json!({
                         "jsonrpc": "2.0",
@@ -386,10 +366,8 @@ async fn handle_jsonrpc_message(
         }
         Err(e) => {
             if is_notification {
-                // Notifications don't get error responses either
                 (None, notifications)
             } else {
-                // Build error response
                 (
                     Some(jsonrpc_error_response(id, -32000, &e.to_string(), None)),
                     notifications,

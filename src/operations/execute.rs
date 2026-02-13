@@ -20,8 +20,6 @@ pub struct ExecuteResult {
 
 /// A bounded ring buffer that keeps only the last `capacity` lines.
 /// When capacity is 0 (unlimited), stores all lines in a plain Vec.
-/// A bounded ring buffer that keeps only the last `capacity` lines.
-/// When capacity is 0 (unlimited), stores all lines in a plain Vec.
 struct TailBuffer {
     /// Ring storage used when capacity > 0.
     ring: Vec<String>,
@@ -101,6 +99,7 @@ impl TailBuffer {
 /// Default maximum lines returned for stdout/stderr.
 pub const DEFAULT_MAX_LINES: usize = 200;
 
+/// Execute a command directly, optionally with args/stdin/cwd/timeout/max_lines.
 pub async fn execute(
     command: &str,
     args: Option<&[String]>,
