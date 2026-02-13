@@ -17,14 +17,83 @@ pub struct ExecuteResult {
     pub stderr_truncated: bool,
 }
 
-/// Keep the last `max_lines` lines of output. Returns (truncated_string, was_truncated).
-fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.len() <= max_lines {
-        (s.to_string(), false)
-    } else {
-        let kept = &lines[lines.len() - max_lines..];
-        (kept.join("\n") + "\n", true)
+/// A bounded ring buffer that keeps only the last `capacity` lines.
+/// When capacity is 0 (unlimited), stores all lines in a plain Vec.
+/// A bounded ring buffer that keeps only the last `capacity` lines.
+/// When capacity is 0 (unlimited), stores all lines in a plain Vec.
+struct TailBuffer {
+    /// Ring storage used when capacity > 0.
+    ring: Vec<String>,
+    /// Monotonic count of lines pushed.
+    total_lines: usize,
+    /// Max lines to keep (0 = unlimited).
+    capacity: usize,
+    /// Unbounded storage used when capacity == 0.
+    all: Vec<String>,
+    /// Whether the last line we saw had a trailing newline.
+    trailing_newline: bool,
+}
+
+impl TailBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            ring: if capacity > 0 {
+                Vec::with_capacity(capacity)
+            } else {
+                Vec::new()
+            },
+            total_lines: 0,
+            capacity,
+            all: Vec::new(),
+            trailing_newline: false,
+        }
+    }
+
+    fn push(&mut self, line: &str, had_newline: bool) {
+        self.total_lines += 1;
+        self.trailing_newline = had_newline;
+        let line = line.to_string();
+        if self.capacity == 0 {
+            self.all.push(line);
+        } else if self.ring.len() < self.capacity {
+            self.ring.push(line);
+        } else {
+            let idx = (self.total_lines - 1) % self.capacity;
+            self.ring[idx] = line;
+        }
+    }
+
+    fn finish(self) -> (String, bool) {
+        let truncated = self.capacity > 0 && self.total_lines > self.capacity;
+
+        let lines = if self.capacity == 0 {
+            self.all
+        } else {
+            let len = self.ring.len();
+            if len == 0 {
+                return (String::new(), false);
+            }
+            if self.total_lines <= self.capacity {
+                self.ring
+            } else {
+                let start = self.total_lines % self.capacity;
+                let mut ordered = Vec::with_capacity(len);
+                for i in 0..len {
+                    ordered.push(self.ring[(start + i) % self.capacity].clone());
+                }
+                ordered
+            }
+        };
+
+        if lines.is_empty() {
+            return (String::new(), false);
+        }
+
+        let mut text = lines.join("\n");
+        if self.trailing_newline {
+            text.push('\n');
+        }
+        (text, truncated)
     }
 }
 
@@ -96,53 +165,66 @@ pub async fn execute(
     }
 
     // Take pipes out of child before spawning concurrent readers to avoid deadlock
-    // when pipe buffers fill up.
-    use tokio::io::AsyncReadExt;
+    // when pipe buffers fill up. Each reader drains lines into a TailBuffer that
+    // sheds old lines as it goes, bounding memory usage.
+    use tokio::io::AsyncBufReadExt;
 
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
+    let max_lines = max_lines.unwrap_or(DEFAULT_MAX_LINES);
 
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_max = max_lines;
     let stdout_handle = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(ref mut out) = stdout_pipe {
-            let _ = out.read_to_end(&mut buf).await;
+        let mut buf = TailBuffer::new(stdout_max);
+        if let Some(out) = stdout_pipe {
+            let mut reader = tokio::io::BufReader::new(out);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let had_newline = line.ends_with('\n');
+                        buf.push(line.trim_end_matches('\n'), had_newline);
+                    }
+                }
+            }
         }
-        buf
+        buf.finish()
     });
 
+    let stderr_max = max_lines;
     let stderr_handle = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(ref mut err) = stderr_pipe {
-            let _ = err.read_to_end(&mut buf).await;
+        let mut buf = TailBuffer::new(stderr_max);
+        if let Some(err) = stderr_pipe {
+            let mut reader = tokio::io::BufReader::new(err);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let had_newline = line.ends_with('\n');
+                        buf.push(line.trim_end_matches('\n'), had_newline);
+                    }
+                }
+            }
         }
-        buf
+        buf.finish()
     });
 
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
     let result = tokio::time::timeout(timeout_duration, async {
-        let stdout_bytes = stdout_handle.await.unwrap_or_default();
-        let stderr_bytes = stderr_handle.await.unwrap_or_default();
+        let stdout_result = stdout_handle.await.unwrap_or_default();
+        let stderr_result = stderr_handle.await.unwrap_or_default();
         let status = child.wait().await;
-        (stdout_bytes, stderr_bytes, status)
+        (stdout_result, stderr_result, status)
     })
     .await;
 
-    let max_lines = max_lines.unwrap_or(DEFAULT_MAX_LINES);
-
     match result {
-        Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
-            let raw_stdout = String::from_utf8_lossy(&stdout_bytes);
-            let raw_stderr = String::from_utf8_lossy(&stderr_bytes);
-            let (stdout, stdout_truncated) = if max_lines == 0 {
-                (raw_stdout.to_string(), false)
-            } else {
-                tail_lines(&raw_stdout, max_lines)
-            };
-            let (stderr, stderr_truncated) = if max_lines == 0 {
-                (raw_stderr.to_string(), false)
-            } else {
-                tail_lines(&raw_stderr, max_lines)
-            };
+        Ok(((stdout, stdout_truncated), (stderr, stderr_truncated), Ok(status))) => {
             Ok(ExecuteResult {
                 exit_code: status.code().unwrap_or(-1),
                 stdout,
