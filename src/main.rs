@@ -113,8 +113,9 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             }
         };
 
-        // Handle message and get response
-        let response = handle_jsonrpc_message(Arc::clone(&server), message).await;
+        // Handle message and get response + notifications
+        let (response, notifications) =
+            handle_jsonrpc_message(Arc::clone(&server), message).await;
 
         // Send response if present (notifications don't have responses)
         if let Some(resp) = response {
@@ -128,6 +129,16 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             if let Err(e) = transport.write_message(&resp_str).await {
                 eprintln!("Error writing response: {}", e);
                 break;
+            }
+        }
+
+        // Send any notifications
+        for notif in notifications {
+            if let Ok(notif_str) = serde_json::to_string(&notif) {
+                if let Err(e) = transport.write_message(&notif_str).await {
+                    eprintln!("Error writing notification: {}", e);
+                    break;
+                }
             }
         }
     }
@@ -177,14 +188,25 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
                     }
                 };
 
-                // Handle message and get response
-                let response = handle_jsonrpc_message(Arc::clone(&server), message).await;
+                // Handle message and get response + notifications
+                let (response, notifications) =
+                    handle_jsonrpc_message(Arc::clone(&server), message).await;
 
                 // Send response if present
                 if let Some(resp) = response {
                     if let Ok(resp_str) = serde_json::to_string(&resp) {
                         if let Err(e) = sender.send(Message::Text(resp_str.into())).await {
                             eprintln!("Error sending WebSocket response: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                // Send any notifications
+                for notif in notifications {
+                    if let Ok(notif_str) = serde_json::to_string(&notif) {
+                        if let Err(e) = sender.send(Message::Text(notif_str.into())).await {
+                            eprintln!("Error sending WebSocket notification: {}", e);
                             break;
                         }
                     }
@@ -202,13 +224,20 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
     }
 }
 
-async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Option<Value> {
+/// Handle a JSON-RPC message. Returns (response, notifications).
+async fn handle_jsonrpc_message(
+    server: Arc<McpServer>,
+    message: Value,
+) -> (Option<Value>, Vec<Value>) {
     // Validate JSON-RPC version (if present)
     if let Some(jsonrpc_version) = message.get("jsonrpc").and_then(|v| v.as_str()) {
         if jsonrpc_version != "2.0" {
             let id = message.get("id").cloned();
             let error_msg = format!("Invalid JSON-RPC version: {}", jsonrpc_version);
-            return Some(jsonrpc_error_response(id, -32600, &error_msg, None));
+            return (
+                Some(jsonrpc_error_response(id, -32600, &error_msg, None)),
+                vec![],
+            );
         }
     }
 
@@ -219,6 +248,8 @@ async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Optio
 
     // Check if this is a notification (no id) or request (has id)
     let is_notification = id.is_none();
+
+    let mut notifications = Vec::new();
 
     // Handle different MCP methods
     let result = match method {
@@ -246,25 +277,31 @@ async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Optio
         Some("tools/list") => {
             // Check if server is initialized
             if !server.is_initialized().await {
-                return Some(jsonrpc_error_response(
-                    id,
-                    -32000,
-                    "Server not initialized. Call 'initialize' first.",
-                    None,
-                ));
+                return (
+                    Some(jsonrpc_error_response(
+                        id,
+                        -32000,
+                        "Server not initialized. Call 'initialize' first.",
+                        None,
+                    )),
+                    vec![],
+                );
             }
 
-            Ok(serde_json::json!({ "tools": server.list_tools() }))
+            Ok(serde_json::json!({ "tools": server.list_tools().await }))
         }
         Some("tools/call") => {
             // Check if server is initialized
             if !server.is_initialized().await {
-                return Some(jsonrpc_error_response(
-                    id,
-                    -32000,
-                    "Server not initialized. Call 'initialize' first.",
-                    None,
-                ));
+                return (
+                    Some(jsonrpc_error_response(
+                        id,
+                        -32000,
+                        "Server not initialized. Call 'initialize' first.",
+                        None,
+                    )),
+                    vec![],
+                );
             }
 
             let tool_name = params.get("name").and_then(|n| n.as_str());
@@ -272,28 +309,42 @@ async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Optio
 
             if let Some(name) = tool_name {
                 match server.handle_tool_call(name, arguments).await {
-                    Ok(result) => Ok(result),
+                    Ok((result, tools_changed)) => {
+                        if tools_changed {
+                            notifications.push(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/tools/list_changed"
+                            }));
+                        }
+                        Ok(result)
+                    }
                     Err(e) => Err(e),
                 }
             } else {
                 // Invalid params - JSON-RPC 2.0 error code -32602
-                return Some(jsonrpc_error_response(
-                    id,
-                    -32602,
-                    "Invalid params: Missing tool name",
-                    None,
-                ));
+                return (
+                    Some(jsonrpc_error_response(
+                        id,
+                        -32602,
+                        "Invalid params: Missing tool name",
+                        None,
+                    )),
+                    vec![],
+                );
             }
         }
         Some("shutdown") => {
             // Check if server is initialized
             if !server.is_initialized().await {
-                return Some(jsonrpc_error_response(
-                    id,
-                    -32000,
-                    "Server not initialized. Call 'initialize' first.",
-                    None,
-                ));
+                return (
+                    Some(jsonrpc_error_response(
+                        id,
+                        -32000,
+                        "Server not initialized. Call 'initialize' first.",
+                        None,
+                    )),
+                    vec![],
+                );
             }
 
             match server.handle_shutdown().await {
@@ -303,12 +354,15 @@ async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Optio
         }
         Some(_) | None => {
             // Method not found - JSON-RPC 2.0 error code -32601
-            return Some(jsonrpc_error_response(
-                id,
-                -32601,
-                &format!("Method not found: {:?}", method.unwrap_or("(missing)")),
-                None,
-            ));
+            return (
+                Some(jsonrpc_error_response(
+                    id,
+                    -32601,
+                    &format!("Method not found: {:?}", method.unwrap_or("(missing)")),
+                    None,
+                )),
+                vec![],
+            );
         }
     };
 
@@ -317,23 +371,29 @@ async fn handle_jsonrpc_message(server: Arc<McpServer>, message: Value) -> Optio
         Ok(result_value) => {
             if is_notification {
                 // Notifications don't get responses
-                None
+                (None, notifications)
             } else {
                 // Build success response
-                Some(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": result_value,
-                }))
+                (
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result_value,
+                    })),
+                    notifications,
+                )
             }
         }
         Err(e) => {
             if is_notification {
                 // Notifications don't get error responses either
-                None
+                (None, notifications)
             } else {
                 // Build error response
-                Some(jsonrpc_error_response(id, -32000, &e.to_string(), None))
+                (
+                    Some(jsonrpc_error_response(id, -32000, &e.to_string(), None)),
+                    notifications,
+                )
             }
         }
     }

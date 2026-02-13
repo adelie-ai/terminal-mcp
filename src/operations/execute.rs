@@ -4,6 +4,7 @@
 
 use crate::error::{Result, ShellError};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 use tokio::process::Command;
 
@@ -108,6 +109,33 @@ pub async fn execute(
     stdin_input: Option<&str>,
     max_lines: Option<usize>,
 ) -> Result<ExecuteResult> {
+    execute_inner(command, args, cwd, timeout_secs, stdin_input, max_lines, None, None).await
+}
+
+/// Execute a shell script by piping it into `sh -s -- [args]`.
+pub async fn execute_script(
+    script: &str,
+    args: Option<&[String]>,
+    cwd: Option<&str>,
+    timeout_secs: Option<u64>,
+    max_lines: Option<usize>,
+    env_vars: Option<&HashMap<String, String>>,
+) -> Result<ExecuteResult> {
+    execute_inner("sh", None, cwd, timeout_secs, Some(script), max_lines, Some(args), env_vars).await
+}
+
+/// Inner execute function. When `script_args` is Some, we're in script mode:
+/// the command is `sh`, and we add `-s -- [script_args]` to the argument list.
+async fn execute_inner(
+    command: &str,
+    args: Option<&[String]>,
+    cwd: Option<&str>,
+    timeout_secs: Option<u64>,
+    stdin_input: Option<&str>,
+    max_lines: Option<usize>,
+    script_args: Option<Option<&[String]>>,
+    env_vars: Option<&HashMap<String, String>>,
+) -> Result<ExecuteResult> {
     if command.is_empty() {
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
     }
@@ -116,8 +144,21 @@ pub async fn execute(
 
     let mut cmd = Command::new(command);
 
-    if let Some(args) = args {
+    if let Some(script_args) = script_args {
+        // Script mode: sh -s -- [args]
+        cmd.arg("-s");
+        cmd.arg("--");
+        if let Some(extra) = script_args {
+            cmd.args(extra);
+        }
+    } else if let Some(args) = args {
         cmd.args(args);
+    }
+
+    if let Some(vars) = env_vars {
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
     }
 
     if let Some(cwd) = cwd {
@@ -378,6 +419,43 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(!result.stdout_truncated);
         assert_eq!(result.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_execute_script_basic() {
+        let result = execute_script("echo hello\necho world", None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        let lines: Vec<&str> = result.stdout.trim().lines().collect();
+        assert_eq!(lines, vec!["hello", "world"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_script_with_args() {
+        let result = execute_script(
+            "echo \"arg1=$1 arg2=$2\"",
+            Some(&["foo".to_string(), "bar".to_string()]),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "arg1=foo arg2=bar");
+    }
+
+    #[tokio::test]
+    async fn test_execute_script_with_env_vars() {
+        let mut env = HashMap::new();
+        env.insert("MY_VAR".to_string(), "hello_env".to_string());
+        let result = execute_script("echo $MY_VAR", None, None, None, None, Some(&env))
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "hello_env");
     }
 
     #[tokio::test]

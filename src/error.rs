@@ -23,6 +23,10 @@ pub enum TerminalMcpError {
     #[error("Transport error: {0}")]
     Transport(#[from] TransportError),
 
+    /// Script errors
+    #[error("Script error: {0}")]
+    Script(#[from] ScriptError),
+
     /// IO errors
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -46,6 +50,18 @@ pub enum ShellError {
     /// Invalid command
     #[error("Invalid command: {0}")]
     InvalidCommand(String),
+}
+
+/// Script storage errors
+#[derive(Error, Debug)]
+pub enum ScriptError {
+    /// Script not found
+    #[error("Script not found: {0}")]
+    NotFound(String),
+
+    /// Invalid script name
+    #[error("Invalid script name: {0}")]
+    InvalidName(String),
 }
 
 /// MCP protocol errors

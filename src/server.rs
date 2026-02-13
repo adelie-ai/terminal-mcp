@@ -38,7 +38,7 @@ impl McpServer {
             return Err(McpError::InvalidProtocolVersion(protocol_version.to_string()).into());
         }
 
-        let tools = self.tool_registry.list_tools();
+        let tools = self.tool_registry.list_tools().await;
 
         let capabilities = serde_json::json!({
             "protocolVersion": protocol_version,
@@ -48,7 +48,7 @@ impl McpServer {
             },
             "capabilities": {
                 "tools": {
-                    "listChanged": false,
+                    "listChanged": true,
                 },
             },
             "tools": tools,
@@ -64,8 +64,12 @@ impl McpServer {
         Ok(())
     }
 
-    /// Handle tool call
-    pub async fn handle_tool_call(&self, tool_name: &str, arguments: &Value) -> Result<Value> {
+    /// Handle tool call. Returns (result, tools_changed).
+    pub async fn handle_tool_call(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> Result<(Value, bool)> {
         self.tool_registry.execute_tool(tool_name, arguments).await
     }
 
@@ -77,8 +81,8 @@ impl McpServer {
     }
 
     /// List tools in MCP schema format
-    pub fn list_tools(&self) -> Value {
-        self.tool_registry.list_tools()
+    pub async fn list_tools(&self) -> Value {
+        self.tool_registry.list_tools().await
     }
 
     /// Check if server is initialized
