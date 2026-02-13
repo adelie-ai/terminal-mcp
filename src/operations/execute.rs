@@ -108,7 +108,14 @@ pub async fn execute(
     stdin_input: Option<&str>,
     max_lines: Option<usize>,
 ) -> Result<ExecuteResult> {
-    execute_inner(command, args, cwd, timeout_secs, stdin_input, max_lines, None, None).await
+    execute_inner(
+        command,
+        cwd,
+        timeout_secs,
+        max_lines,
+        ExecuteMode::Command { args, stdin_input },
+    )
+    .await
 }
 
 /// Execute a shell script by piping it into `sh -s -- [args]`.
@@ -120,20 +127,39 @@ pub async fn execute_script(
     max_lines: Option<usize>,
     env_vars: Option<&HashMap<String, String>>,
 ) -> Result<ExecuteResult> {
-    execute_inner("sh", None, cwd, timeout_secs, Some(script), max_lines, Some(args), env_vars).await
+    execute_inner(
+        "sh",
+        cwd,
+        timeout_secs,
+        max_lines,
+        ExecuteMode::Script {
+            script,
+            script_args: args,
+            env_vars,
+        },
+    )
+    .await
 }
 
-/// Inner execute function. When `script_args` is Some, we're in script mode:
-/// the command is `sh`, and we add `-s -- [script_args]` to the argument list.
+enum ExecuteMode<'a> {
+    Command {
+        args: Option<&'a [String]>,
+        stdin_input: Option<&'a str>,
+    },
+    Script {
+        script: &'a str,
+        script_args: Option<&'a [String]>,
+        env_vars: Option<&'a HashMap<String, String>>,
+    },
+}
+
+/// Inner execution function shared by direct command and script execution paths.
 async fn execute_inner(
     command: &str,
-    args: Option<&[String]>,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
-    stdin_input: Option<&str>,
     max_lines: Option<usize>,
-    script_args: Option<Option<&[String]>>,
-    env_vars: Option<&HashMap<String, String>>,
+    mode: ExecuteMode<'_>,
 ) -> Result<ExecuteResult> {
     if command.is_empty() {
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
@@ -143,14 +169,23 @@ async fn execute_inner(
 
     let mut cmd = Command::new(command);
 
-    if let Some(script_args) = script_args {
-        // Script mode: sh -s -- [args]
-        cmd.arg("-s");
-        cmd.arg("--");
-        if let Some(extra) = script_args {
-            cmd.args(extra);
+    let (command_args, env_vars, stdin_input) = match mode {
+        ExecuteMode::Command { args, stdin_input } => (args, None, stdin_input),
+        ExecuteMode::Script {
+            script,
+            script_args,
+            env_vars,
+        } => {
+            cmd.arg("-s");
+            cmd.arg("--");
+            if let Some(extra) = script_args {
+                cmd.args(extra);
+            }
+            (None, env_vars, Some(script))
         }
-    } else if let Some(args) = args {
+    };
+
+    if let Some(args) = command_args {
         cmd.args(args);
     }
 

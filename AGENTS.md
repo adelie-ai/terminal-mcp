@@ -57,7 +57,8 @@ Practical expectations:
 Before finishing:
 
 - Run relevant tests (`cargo test <filter>`), then `cargo test` when practical.
-- Ensure the project compiles cleanly under `#![deny(warnings)]` and clippy deny settings.
+- Run clippy with strict settings (`cargo clippy --all-targets --all-features -- -D warnings`) and fix all findings.
+- Ensure the repository remains fully clean under `#![deny(warnings)]` and clippy deny settings, including pre-existing warnings/lints.
 - Confirm docs updated when behavior or interfaces changed.
 
 ## MCP-specific notes
