@@ -128,12 +128,11 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
         }
 
         for notif in notifications {
-            if let Ok(notif_str) = serde_json::to_string(&notif) {
-                if let Err(e) = transport.write_message(&notif_str).await {
+            if let Ok(notif_str) = serde_json::to_string(&notif)
+                && let Err(e) = transport.write_message(&notif_str).await {
                     eprintln!("Error writing notification: {}", e);
                     break;
                 }
-            }
         }
     }
 
@@ -186,22 +185,19 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
                 let (response, notifications) =
                     handle_jsonrpc_message(Arc::clone(&server), message).await;
 
-                if let Some(resp) = response {
-                    if let Ok(resp_str) = serde_json::to_string(&resp) {
-                        if let Err(e) = sender.send(Message::Text(resp_str.into())).await {
+                if let Some(resp) = response
+                    && let Ok(resp_str) = serde_json::to_string(&resp)
+                        && let Err(e) = sender.send(Message::Text(resp_str.into())).await {
                             eprintln!("Error sending WebSocket response: {}", e);
                             break;
                         }
-                    }
-                }
 
                 for notif in notifications {
-                    if let Ok(notif_str) = serde_json::to_string(&notif) {
-                        if let Err(e) = sender.send(Message::Text(notif_str.into())).await {
+                    if let Ok(notif_str) = serde_json::to_string(&notif)
+                        && let Err(e) = sender.send(Message::Text(notif_str.into())).await {
                             eprintln!("Error sending WebSocket notification: {}", e);
                             break;
                         }
-                    }
                 }
             }
             Ok(Message::Close(_)) => {
@@ -221,8 +217,8 @@ async fn handle_jsonrpc_message(
     server: Arc<McpServer>,
     message: Value,
 ) -> (Option<Value>, Vec<Value>) {
-    if let Some(jsonrpc_version) = message.get("jsonrpc").and_then(|v| v.as_str()) {
-        if jsonrpc_version != "2.0" {
+    if let Some(jsonrpc_version) = message.get("jsonrpc").and_then(|v| v.as_str())
+        && jsonrpc_version != "2.0" {
             let id = message.get("id").cloned();
             let error_msg = format!("Invalid JSON-RPC version: {}", jsonrpc_version);
             return (
@@ -230,7 +226,6 @@ async fn handle_jsonrpc_message(
                 vec![],
             );
         }
-    }
 
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(|m| m.as_str());

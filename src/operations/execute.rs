@@ -231,13 +231,12 @@ async fn execute_inner(
     };
 
     // Write stdin if provided
-    if let Some(input) = stdin_input {
-        if let Some(mut child_stdin) = child.stdin.take() {
+    if let Some(input) = stdin_input
+        && let Some(mut child_stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             let _ = child_stdin.write_all(input.as_bytes()).await;
             drop(child_stdin);
         }
-    }
 
     // Take pipes out of child before spawning concurrent readers to avoid deadlock
     // when pipe buffers fill up. Each reader drains lines into a TailBuffer that
