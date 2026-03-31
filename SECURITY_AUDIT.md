@@ -26,13 +26,14 @@ terminal-mcp executes arbitrary shell commands by design. This is inherently hig
 
 ## High Severity
 
-### 2. No Authentication on Tool Calls (HIGH)
+### 2. No Authentication on Tool Calls (ACKNOWLEDGED — HIGH)
 
 **File:** `src/main.rs`, `src/server.rs`
 
-No authentication mechanism exists for WebSocket mode. Any connected client can execute commands.
+**Status:** Acknowledged (2026-03-31). Runtime and `--help` warnings added. Auth design TBD.
+**Rationale:** WebSocket mode has no authentication. Mitigated by defaulting to localhost and printing a security warning at startup (with extra warning if binding to all interfaces). Stdio mode is unaffected (parent process controls access). Token-based auth needs design work before implementation.
 
-**Recommendation:** Add token-based authentication for WebSocket mode. For stdio mode this is acceptable (parent process controls access).
+**Recommendation:** Add token-based authentication for WebSocket mode.
 
 ---
 

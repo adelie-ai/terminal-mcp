@@ -38,7 +38,7 @@ impl fmt::Display for TransportMode {
 #[command(name = "terminal-mcp")]
 #[command(about = "Terminal MCP Server")]
 #[command(
-    long_about = "terminal-mcp provides shell command execution as an MCP server for LLM orchestrators.\n\nUsage:\n  terminal-mcp serve --mode stdio\n  terminal-mcp serve --mode websocket --host 0.0.0.0 --port 8080"
+    long_about = "terminal-mcp provides shell command execution as an MCP server for LLM orchestrators.\n\nUsage:\n  terminal-mcp serve --mode stdio\n  terminal-mcp serve --mode websocket --port 8080\n\nSECURITY WARNING: WebSocket mode has no authentication. Any client that\ncan reach the listening address can execute arbitrary commands as your\nuser. Only use WebSocket mode on localhost (the default) or behind a\nreverse proxy that enforces authentication."
 )]
 #[command(version)]
 struct Cli {
@@ -90,7 +90,20 @@ async fn main() -> Result<()> {
 
             match mode {
                 TransportMode::Stdio => run_stdio_server(server).await?,
-                TransportMode::Websocket => run_websocket_server(server, &host, port).await?,
+                TransportMode::Websocket => {
+                    eprintln!(
+                        "WARNING: WebSocket mode has no authentication. \
+                         Any client that can reach {}:{} can execute commands as your user.",
+                        host, port
+                    );
+                    if host == "0.0.0.0" || host == "::" {
+                        eprintln!(
+                            "WARNING: Binding to all interfaces — the server is network-accessible. \
+                             Use --host 127.0.0.1 to restrict to localhost."
+                        );
+                    }
+                    run_websocket_server(server, &host, port).await?
+                }
             }
         }
     }
