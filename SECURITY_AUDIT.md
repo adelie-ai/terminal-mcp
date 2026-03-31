@@ -7,65 +7,29 @@
 
 ## Design Note
 
-terminal-mcp executes arbitrary shell commands by design. This is inherently high-risk and is its intended purpose. It assumes a trusted local client. The findings below are defense-in-depth recommendations, not design flaws.
+terminal-mcp executes arbitrary shell commands by design. This is inherently high-risk and is its intended purpose. It assumes a trusted local client.
 
 ---
 
 ## Critical Severity
 
-### 1. No Resource Limits (Fork Bombs, Memory Exhaustion)
+### 1. No Resource Limits (Fork Bombs, Memory Exhaustion) (CRITICAL)
 
-**File:** `src/operations/execute.rs:291-329`
+**File:** `src/operations/execute.rs`
 
-Only a timeout is enforced. No limits on:
-- Number of child processes
-- Memory consumption
-- CPU usage
-- File descriptors
+Only a timeout and output byte cap are enforced. No limits on child process count, CPU usage, or file descriptors. A fork bomb can crash the host.
 
-A fork bomb (`:(){ :|:& };:`) or memory bomb can crash the server and host.
-
-**Recommendation:** Use cgroups or `setrlimit` to restrict spawned processes. Add a configurable `max_processes` and `max_memory_bytes`.
-
----
-
-### 2. No Privilege Check (Root Execution)
-
-**File:** `src/operations/execute.rs:170-230`
-
-No check prevents the server from running as root. If started as root, all commands inherit root privileges.
-
-**Recommendation:** Add a startup check: refuse to start if `getuid() == 0` unless explicitly overridden with a flag.
+**Recommendation:** Use cgroups or `setrlimit` to restrict spawned processes.
 
 ---
 
 ## High Severity
 
-### 3. WebSocket Binds to 0.0.0.0 by Default
+### 2. No Authentication on Tool Calls (HIGH)
 
-**File:** `src/main.rs:60-61`
+**File:** `src/main.rs`, `src/server.rs`
 
-Default binding exposes the service on all network interfaces. Any network client can execute arbitrary commands.
-
-**Recommendation:** Change default to `127.0.0.1`. Require an explicit flag to bind to all interfaces.
-
----
-
-### 4. Unbounded Output Memory
-
-**File:** `src/operations/execute.rs:244-289`
-
-`max_lines` limits line count but not line length or total bytes. A command producing a single multi-GB line exhausts memory.
-
-**Recommendation:** Add `max_output_bytes` with a reasonable default (e.g. 10 MiB).
-
----
-
-### 5. No Authentication on Tool Calls
-
-**File:** `src/main.rs:275-314`, `src/server.rs`
-
-No authentication mechanism exists. Any connected MCP client can execute commands, store scripts, and list scripts.
+No authentication mechanism exists for WebSocket mode. Any connected client can execute commands.
 
 **Recommendation:** Add token-based authentication for WebSocket mode. For stdio mode this is acceptable (parent process controls access).
 
@@ -73,7 +37,7 @@ No authentication mechanism exists. Any connected MCP client can execute command
 
 ## Medium Severity
 
-### 6. Stored Script Recursion
+### 3. Stored Script Recursion (MEDIUM)
 
 Scripts can call other stored scripts, potentially creating infinite loops that only terminate on timeout.
 
@@ -81,25 +45,19 @@ Scripts can call other stored scripts, potentially creating infinite loops that 
 
 ---
 
-### 7. Audit Log Filename Collision Risk
+### 4. Output Truncation Hides Data Silently (MEDIUM)
 
-**File:** `src/operations/audit.rs:32-34`
-
-Session ID is truncated to 8 hex chars (32-bit space). Multiple servers starting in the same second could collide.
-
-**Recommendation:** Use full UUID or add PID to filename.
-
----
-
-### 8. Output Truncation Hides Data Silently
-
-**File:** `src/operations/execute.rs:301-309`
-
-When `max_lines` is exceeded, `stdout_truncated: true` is set but the total line count and number of dropped lines are not reported.
+When `max_lines` is exceeded, `stdout_truncated: true` is set but total line count and dropped lines are not reported.
 
 **Recommendation:** Include `total_lines` and `lines_dropped` in the result.
 
 ---
+
+## Resolved (2026-03-31)
+
+- Root execution check — refuses to start if UID == 0
+- WebSocket default bind — changed from 0.0.0.0 to 127.0.0.1
+- Output memory limits — 1 MiB per-line cap, 10 MiB total byte cap in TailBuffer
 
 ## Positive Findings
 
@@ -107,4 +65,4 @@ When `max_lines` is exceeded, `stdout_truncated: true` is set but the total line
 - Audit logging with session tracking
 - Script arguments passed via environment variables (not shell interpolation)
 - `Command::new()` used directly (no shell invocation for non-script commands)
-- Script execution uses `sh -s` with stdin piping (arguments not in command line)
+- Output byte cap prevents memory exhaustion from long lines
