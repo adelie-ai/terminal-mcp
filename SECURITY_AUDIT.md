@@ -53,12 +53,6 @@ When `max_lines` is exceeded, `stdout_truncated: true` is set but total line cou
 
 ---
 
-## Resolved (2026-03-31)
-
-- Root execution check — refuses to start if UID == 0
-- WebSocket default bind — changed from 0.0.0.0 to 127.0.0.1
-- Output memory limits — 1 MiB per-line cap, 10 MiB total byte cap in TailBuffer
-
 ## Positive Findings
 
 - Timeout enforcement on all commands
