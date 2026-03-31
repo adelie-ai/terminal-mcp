@@ -56,14 +56,32 @@ enum Commands {
         /// Port for WebSocket mode (ignored for stdio)
         #[arg(short, long, default_value_t = 8080)]
         port: u16,
-        /// Host for WebSocket mode (ignored for stdio)
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Host for WebSocket mode (ignored for stdio).
+        /// Defaults to 127.0.0.1 (localhost only) for security.
+        /// Use 0.0.0.0 explicitly to bind on all interfaces.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Refuse to run as root — all spawned commands would inherit root privileges.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata("/proc/self") {
+            if meta.uid() == 0 {
+                eprintln!(
+                    "error: terminal-mcp must not run as root. \
+                     All spawned commands would inherit root privileges.\n\
+                     Run as an unprivileged user instead."
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cli = Cli::parse();
 
     match cli.command {

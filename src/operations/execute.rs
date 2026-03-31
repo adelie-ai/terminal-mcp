@@ -20,6 +20,8 @@ pub struct ExecuteResult {
 
 /// A bounded ring buffer that keeps only the last `capacity` lines.
 /// When capacity is 0 (unlimited), stores all lines in a plain Vec.
+/// In both modes, total stored bytes are capped at `MAX_BUFFER_BYTES`
+/// to prevent memory exhaustion from extremely long lines.
 struct TailBuffer {
     /// Ring storage used when capacity > 0.
     ring: Vec<String>,
@@ -31,6 +33,8 @@ struct TailBuffer {
     all: Vec<String>,
     /// Whether the last line we saw had a trailing newline.
     trailing_newline: bool,
+    /// Approximate number of bytes stored (for the byte cap).
+    stored_bytes: usize,
 }
 
 impl TailBuffer {
@@ -45,19 +49,34 @@ impl TailBuffer {
             capacity,
             all: Vec::new(),
             trailing_newline: false,
+            stored_bytes: 0,
         }
     }
 
     fn push(&mut self, line: &str, had_newline: bool) {
         self.total_lines += 1;
         self.trailing_newline = had_newline;
+        // Cap individual lines to prevent a single multi-GB line from
+        // exhausting memory.  Truncate to 1 MiB if necessary.
+        let line = if line.len() > 1_048_576 {
+            &line[..1_048_576]
+        } else {
+            line
+        };
+        // Drop lines once the byte budget is exhausted (in unlimited mode).
+        if self.capacity == 0 && self.stored_bytes + line.len() > MAX_BUFFER_BYTES {
+            return;
+        }
         let line = line.to_string();
+        self.stored_bytes += line.len();
         if self.capacity == 0 {
             self.all.push(line);
         } else if self.ring.len() < self.capacity {
             self.ring.push(line);
         } else {
             let idx = (self.total_lines - 1) % self.capacity;
+            // Subtract evicted line bytes before replacing.
+            self.stored_bytes = self.stored_bytes.saturating_sub(self.ring[idx].len());
             self.ring[idx] = line;
         }
     }
@@ -98,6 +117,10 @@ impl TailBuffer {
 
 /// Default maximum lines returned for stdout/stderr.
 pub const DEFAULT_MAX_LINES: usize = 200;
+
+/// Maximum total bytes stored in a TailBuffer before further lines are dropped.
+/// This guards against single extremely long lines exhausting memory.
+const MAX_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Execute a command directly, optionally with args/stdin/cwd/timeout/max_lines.
 pub async fn execute(
