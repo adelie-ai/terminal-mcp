@@ -3,18 +3,18 @@
 // Binary crate for terminal-mcp - uses library crate
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
+    Router,
+    extract::{State, ws::WebSocketUpgrade},
     response::Response,
     routing::get,
-    Router,
 };
 use clap::{Parser, ValueEnum};
-use terminal_mcp::error::Result;
-use terminal_mcp::server::McpServer;
-use terminal_mcp::transport::StdioTransportHandler;
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
+use terminal_mcp::error::Result;
+use terminal_mcp::server::McpServer;
+use terminal_mcp::transport::StdioTransportHandler;
 use tokio::net::TcpListener;
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -70,15 +70,15 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let Ok(meta) = std::fs::metadata("/proc/self") {
-            if meta.uid() == 0 {
-                eprintln!(
-                    "error: terminal-mcp must not run as root. \
-                     All spawned commands would inherit root privileges.\n\
-                     Run as an unprivileged user instead."
-                );
-                std::process::exit(1);
-            }
+        if let Ok(meta) = std::fs::metadata("/proc/self")
+            && meta.uid() == 0
+        {
+            eprintln!(
+                "error: terminal-mcp must not run as root. \
+                 All spawned commands would inherit root privileges.\n\
+                 Run as an unprivileged user instead."
+            );
+            std::process::exit(1);
         }
     }
 
@@ -141,8 +141,7 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
             }
         };
 
-        let (response, notifications) =
-            handle_jsonrpc_message(Arc::clone(&server), message).await;
+        let (response, notifications) = handle_jsonrpc_message(Arc::clone(&server), message).await;
 
         if let Some(resp) = response {
             let resp_str = match serde_json::to_string(&resp) {
@@ -160,10 +159,11 @@ async fn run_stdio_server(server: McpServer) -> Result<()> {
 
         for notif in notifications {
             if let Ok(notif_str) = serde_json::to_string(&notif)
-                && let Err(e) = transport.write_message(&notif_str).await {
-                    eprintln!("Error writing notification: {}", e);
-                    break;
-                }
+                && let Err(e) = transport.write_message(&notif_str).await
+            {
+                eprintln!("Error writing notification: {}", e);
+                break;
+            }
         }
     }
 
@@ -218,17 +218,19 @@ async fn handle_websocket_connection(socket: axum::extract::ws::WebSocket, serve
 
                 if let Some(resp) = response
                     && let Ok(resp_str) = serde_json::to_string(&resp)
-                        && let Err(e) = sender.send(Message::Text(resp_str.into())).await {
-                            eprintln!("Error sending WebSocket response: {}", e);
-                            break;
-                        }
+                    && let Err(e) = sender.send(Message::Text(resp_str.into())).await
+                {
+                    eprintln!("Error sending WebSocket response: {}", e);
+                    break;
+                }
 
                 for notif in notifications {
                     if let Ok(notif_str) = serde_json::to_string(&notif)
-                        && let Err(e) = sender.send(Message::Text(notif_str.into())).await {
-                            eprintln!("Error sending WebSocket notification: {}", e);
-                            break;
-                        }
+                        && let Err(e) = sender.send(Message::Text(notif_str.into())).await
+                    {
+                        eprintln!("Error sending WebSocket notification: {}", e);
+                        break;
+                    }
                 }
             }
             Ok(Message::Close(_)) => {
@@ -249,14 +251,15 @@ async fn handle_jsonrpc_message(
     message: Value,
 ) -> (Option<Value>, Vec<Value>) {
     if let Some(jsonrpc_version) = message.get("jsonrpc").and_then(|v| v.as_str())
-        && jsonrpc_version != "2.0" {
-            let id = message.get("id").cloned();
-            let error_msg = format!("Invalid JSON-RPC version: {}", jsonrpc_version);
-            return (
-                Some(jsonrpc_error_response(id, -32600, &error_msg, None)),
-                vec![],
-            );
-        }
+        && jsonrpc_version != "2.0"
+    {
+        let id = message.get("id").cloned();
+        let error_msg = format!("Invalid JSON-RPC version: {}", jsonrpc_version);
+        return (
+            Some(jsonrpc_error_response(id, -32600, &error_msg, None)),
+            vec![],
+        );
+    }
 
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(|m| m.as_str());
