@@ -255,11 +255,12 @@ async fn execute_inner(
 
     // Write stdin if provided
     if let Some(input) = stdin_input
-        && let Some(mut child_stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = child_stdin.write_all(input.as_bytes()).await;
-            drop(child_stdin);
-        }
+        && let Some(mut child_stdin) = child.stdin.take()
+    {
+        use tokio::io::AsyncWriteExt;
+        let _ = child_stdin.write_all(input.as_bytes()).await;
+        drop(child_stdin);
+    }
 
     // Take pipes out of child before spawning concurrent readers to avoid deadlock
     // when pipe buffers fill up. Each reader drains lines into a TailBuffer that
@@ -386,16 +387,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_zero_exit_code() {
-        let result = execute("false", None, None, None, None, None).await.unwrap();
+        let result = execute("false", None, None, None, None, None)
+            .await
+            .unwrap();
         assert_ne!(result.exit_code, 0);
         assert!(!result.timed_out);
     }
 
     #[tokio::test]
     async fn test_timeout() {
-        let result = execute("sleep", Some(&["10".to_string()]), None, Some(1), None, None)
-            .await
-            .unwrap();
+        let result = execute(
+            "sleep",
+            Some(&["10".to_string()]),
+            None,
+            Some(1),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(result.timed_out);
         assert_eq!(result.exit_code, -1);
     }
@@ -411,7 +421,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let result = execute("nonexistent_command_xyz_12345", None, None, None, None, None).await;
+        let result = execute(
+            "nonexistent_command_xyz_12345",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("not found") || err.contains("Command not found"));
@@ -451,7 +469,10 @@ mod tests {
         // Generate 10 lines, keep last 3
         let result = execute(
             "sh",
-            Some(&["-c".to_string(), "for i in $(seq 1 10); do echo line$i; done".to_string()]),
+            Some(&[
+                "-c".to_string(),
+                "for i in $(seq 1 10); do echo line$i; done".to_string(),
+            ]),
             None,
             None,
             None,
@@ -469,9 +490,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_lines_no_truncation_when_under() {
-        let result = execute("echo", Some(&["hello".to_string()]), None, None, None, Some(5))
-            .await
-            .unwrap();
+        let result = execute(
+            "echo",
+            Some(&["hello".to_string()]),
+            None,
+            None,
+            None,
+            Some(5),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(!result.stdout_truncated);
         assert_eq!(result.stdout.trim(), "hello");
@@ -518,7 +546,10 @@ mod tests {
     async fn test_max_lines_zero_means_unlimited() {
         let result = execute(
             "sh",
-            Some(&["-c".to_string(), "for i in $(seq 1 10); do echo line$i; done".to_string()]),
+            Some(&[
+                "-c".to_string(),
+                "for i in $(seq 1 10); do echo line$i; done".to_string(),
+            ]),
             None,
             None,
             None,

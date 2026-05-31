@@ -106,10 +106,7 @@ impl ToolRegistry {
         }
     }
 
-    async fn exec_terminal_execute(
-        &self,
-        args: &serde_json::Map<String, Value>,
-    ) -> Result<Value> {
+    async fn exec_terminal_execute(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
         let script = args.get("script").and_then(|v| v.as_str());
         let stdin_input = args.get("stdin").and_then(|v| v.as_str());
 
@@ -155,14 +152,14 @@ impl ToolRegistry {
 
             (result, command_desc)
         } else {
-            let command =
-                args.get("command")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        McpError::InvalidToolParameters(
-                            "Missing required parameter: command".to_string(),
-                        )
-                    })?;
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    McpError::InvalidToolParameters(
+                        "Missing required parameter: command".to_string(),
+                    )
+                })?;
 
             let cmd_args: Option<Vec<String>> = args.get("args").and_then(|v| {
                 v.as_array().map(|arr| {
@@ -192,23 +189,18 @@ impl ToolRegistry {
             (result, command_desc)
         };
 
-        let audit_log_file = self.audit_logger.as_ref().map(|logger| {
-            logger.log_command(&command_desc, cwd, &result)
-        });
+        let audit_log_file = self
+            .audit_logger
+            .as_ref()
+            .map(|logger| logger.log_command(&command_desc, cwd, &result));
 
         Ok(execution_result_json(&result, audit_log_file.as_deref()))
     }
 
-    async fn exec_store_script(
-        &self,
-        args: &serde_json::Map<String, Value>,
-    ) -> Result<Value> {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::InvalidToolParameters("Missing required parameter: name".to_string())
-            })?;
+    async fn exec_store_script(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
+        let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            McpError::InvalidToolParameters("Missing required parameter: name".to_string())
+        })?;
 
         validate_script_name(name)?;
 
@@ -221,12 +213,9 @@ impl ToolRegistry {
                 )
             })?;
 
-        let script_body = args
-            .get("script")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::InvalidToolParameters("Missing required parameter: script".to_string())
-            })?;
+        let script_body = args.get("script").and_then(|v| v.as_str()).ok_or_else(|| {
+            McpError::InvalidToolParameters("Missing required parameter: script".to_string())
+        })?;
 
         let parameters = parse_script_parameters(args.get("parameters"))?;
 
@@ -252,16 +241,10 @@ impl ToolRegistry {
         }))
     }
 
-    async fn exec_remove_script(
-        &self,
-        args: &serde_json::Map<String, Value>,
-    ) -> Result<Value> {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::InvalidToolParameters("Missing required parameter: name".to_string())
-            })?;
+    async fn exec_remove_script(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
+        let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            McpError::InvalidToolParameters("Missing required parameter: name".to_string())
+        })?;
 
         let mut scripts = self.scripts.write().await;
         if scripts.remove(name).is_some() {
@@ -388,10 +371,7 @@ fn validate_script_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(ScriptError::InvalidName("Name cannot be empty".to_string()).into());
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(ScriptError::InvalidName(format!(
             "Name must be alphanumeric/underscore only, got: '{}'",
             name
@@ -416,14 +396,9 @@ fn parse_script_parameters(val: Option<&Value>) -> Result<Vec<ScriptParameter>> 
 
     let mut params = Vec::new();
     for item in arr {
-        let name = item
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::InvalidToolParameters(
-                    "Each parameter must have a 'name' string".to_string(),
-                )
-            })?;
+        let name = item.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            McpError::InvalidToolParameters("Each parameter must have a 'name' string".to_string())
+        })?;
         let description = item
             .get("description")
             .and_then(|v| v.as_str())

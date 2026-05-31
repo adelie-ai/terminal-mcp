@@ -1,6 +1,6 @@
 #![deny(warnings)]
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -149,24 +149,24 @@ fn extract_value(tool_result: &Value) -> Value {
         .unwrap_or_else(|| panic!("expected result.content array, got: {tool_result}"));
 
     for entry in content {
-        if entry.get("type") == Some(&Value::String("json".to_string())) {
-            if let Some(v) = entry.get("value") {
-                return v.clone();
-            }
+        if entry.get("type") == Some(&Value::String("json".to_string()))
+            && let Some(v) = entry.get("value")
+        {
+            return v.clone();
         }
     }
 
     for entry in content {
-        if entry.get("type") == Some(&Value::String("text".to_string())) {
-            if let Some(text) = entry.get("text").and_then(|v| v.as_str()) {
-                let trimmed = text.trim();
-                if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                        return v;
-                    }
-                }
-                return Value::String(text.to_string());
+        if entry.get("type") == Some(&Value::String("text".to_string()))
+            && let Some(text) = entry.get("text").and_then(|v| v.as_str())
+        {
+            let trimmed = text.trim();
+            if (trimmed.starts_with('{') || trimmed.starts_with('['))
+                && let Ok(v) = serde_json::from_str::<Value>(trimmed)
+            {
+                return v;
             }
+            return Value::String(text.to_string());
         }
     }
 
@@ -180,10 +180,10 @@ fn extract_text(tool_result: &Value) -> String {
         .unwrap_or_else(|| panic!("expected result.content array, got: {tool_result}"));
 
     for entry in content {
-        if entry.get("type") == Some(&Value::String("text".to_string())) {
-            if let Some(text) = entry.get("text").and_then(|v| v.as_str()) {
-                return text.to_string();
-            }
+        if entry.get("type") == Some(&Value::String("text".to_string()))
+            && let Some(text) = entry.get("text").and_then(|v| v.as_str())
+        {
+            return text.to_string();
         }
     }
 
@@ -224,7 +224,10 @@ fn terminal_execute_simple_command() {
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
-        assert_eq!(v.get("stdout").and_then(|x| x.as_str()).unwrap().trim(), "hello");
+        assert_eq!(
+            v.get("stdout").and_then(|x| x.as_str()).unwrap().trim(),
+            "hello"
+        );
         assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(false));
     });
 }
@@ -264,14 +267,16 @@ fn terminal_execute_non_zero_exit() {
 fn terminal_execute_custom_cwd() {
     run_case(|client| {
         let res = client
-            .tool_call(
-                "terminal_execute",
-                json!({"command": "pwd", "cwd": "/tmp"}),
-            )
+            .tool_call("terminal_execute", json!({"command": "pwd", "cwd": "/tmp"}))
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
-        assert!(v.get("stdout").and_then(|x| x.as_str()).unwrap().contains("tmp"));
+        assert!(
+            v.get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .contains("tmp")
+        );
     });
 }
 
@@ -383,7 +388,10 @@ fn terminal_execute_max_lines_truncation() {
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
-        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            v.get("stdout_truncated").and_then(|x| x.as_bool()),
+            Some(true)
+        );
         let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap();
         let lines: Vec<&str> = stdout.trim().lines().collect();
         assert_eq!(lines.len(), 3);
@@ -402,8 +410,14 @@ fn terminal_execute_max_lines_default_not_truncated() {
             )
             .unwrap();
         let v = extract_value(&res);
-        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(false));
-        assert_eq!(v.get("stderr_truncated").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            v.get("stdout_truncated").and_then(|x| x.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            v.get("stderr_truncated").and_then(|x| x.as_bool()),
+            Some(false)
+        );
     });
 }
 
@@ -417,7 +431,10 @@ fn terminal_execute_max_lines_zero_unlimited() {
             )
             .unwrap();
         let v = extract_value(&res);
-        assert_eq!(v.get("stdout_truncated").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            v.get("stdout_truncated").and_then(|x| x.as_bool()),
+            Some(false)
+        );
         let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap();
         let lines: Vec<&str> = stdout.trim().lines().collect();
         assert_eq!(lines.len(), 300);
@@ -478,14 +495,16 @@ fn terminal_execute_script_with_args() {
 fn terminal_execute_script_with_cwd() {
     run_case(|client| {
         let res = client
-            .tool_call(
-                "terminal_execute",
-                json!({"script": "pwd", "cwd": "/tmp"}),
-            )
+            .tool_call("terminal_execute", json!({"script": "pwd", "cwd": "/tmp"}))
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
-        assert!(v.get("stdout").and_then(|x| x.as_str()).unwrap().contains("tmp"));
+        assert!(
+            v.get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .contains("tmp")
+        );
     });
 }
 
@@ -510,9 +529,7 @@ fn store_script_appears_in_tools_list() {
         // Drain notifications from store
         client.collect_notifications();
 
-        let resp = client
-            .call("tools/list", json!({}))
-            .expect("tools/list");
+        let resp = client.call("tools/list", json!({})).expect("tools/list");
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
@@ -540,12 +557,15 @@ fn call_stored_script_by_dynamic_name() {
             )
             .unwrap();
 
-        let res = client
-            .tool_call("script_greeter", json!({}))
-            .unwrap();
+        let res = client.tool_call("script_greeter", json!({})).unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
-        assert!(v.get("stdout").and_then(|x| x.as_str()).unwrap().contains("hello_from_stored"));
+        assert!(
+            v.get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .contains("hello_from_stored")
+        );
     });
 }
 
@@ -597,18 +617,13 @@ fn remove_script_disappears_from_tools_list() {
             .unwrap();
 
         client
-            .tool_call(
-                "terminal_remove_script",
-                json!({"name": "to_remove"}),
-            )
+            .tool_call("terminal_remove_script", json!({"name": "to_remove"}))
             .unwrap();
 
         // Drain notifications
         client.collect_notifications();
 
-        let resp = client
-            .call("tools/list", json!({}))
-            .expect("tools/list");
+        let resp = client.call("tools/list", json!({})).expect("tools/list");
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
@@ -678,8 +693,7 @@ fn list_changed_notification_after_store() {
         let notifications = client.collect_notifications();
         assert!(
             notifications.iter().any(|n| {
-                n.get("method").and_then(|m| m.as_str())
-                    == Some("notifications/tools/list_changed")
+                n.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
             }),
             "Expected list_changed notification, got: {:?}",
             notifications
@@ -705,17 +719,13 @@ fn list_changed_notification_after_remove() {
         client.collect_notifications();
 
         client
-            .tool_call(
-                "terminal_remove_script",
-                json!({"name": "remove_notif"}),
-            )
+            .tool_call("terminal_remove_script", json!({"name": "remove_notif"}))
             .unwrap();
 
         let notifications = client.collect_notifications();
         assert!(
             notifications.iter().any(|n| {
-                n.get("method").and_then(|m| m.as_str())
-                    == Some("notifications/tools/list_changed")
+                n.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
             }),
             "Expected list_changed notification after remove, got: {:?}",
             notifications
@@ -766,21 +776,21 @@ fn duplicate_script_name_overwrites() {
         assert!(text.contains("updated"), "Expected 'updated' in: {}", text);
 
         // Verify v2 runs
-        let run_res = client
-            .tool_call("script_dup", json!({}))
-            .unwrap();
+        let run_res = client.tool_call("script_dup", json!({})).unwrap();
         let v = extract_value(&run_res);
-        assert!(v.get("stdout").and_then(|x| x.as_str()).unwrap().contains("v2"));
+        assert!(
+            v.get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .contains("v2")
+        );
     });
 }
 
 #[test]
 fn remove_nonexistent_script_errors() {
     run_case(|client| {
-        let res = client.tool_call(
-            "terminal_remove_script",
-            json!({"name": "does_not_exist"}),
-        );
+        let res = client.tool_call("terminal_remove_script", json!({"name": "does_not_exist"}));
         expect_err_contains(res, "not found");
     });
 }
@@ -828,9 +838,7 @@ fn initialize_reports_list_changed_true() {
 #[test]
 fn builtin_tools_present_in_list() {
     run_case(|client| {
-        let resp = client
-            .call("tools/list", json!({}))
-            .expect("tools/list");
+        let resp = client.call("tools/list", json!({})).expect("tools/list");
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
@@ -883,7 +891,10 @@ fn audit_logging_writes_session_and_command_logs() {
     assert_eq!(command_logs.len(), 1, "expected one command log");
 
     let command_log_name = command_logs[0].file_name().to_string_lossy().to_string();
-    assert_eq!(command_log_name, log_file, "tool result should reference command log filename");
+    assert_eq!(
+        command_log_name, log_file,
+        "tool result should reference command log filename"
+    );
 
     let session_content = fs::read_to_string(session_logs[0].path()).expect("read session log");
     assert!(session_content.contains("TOOL terminal_execute"));

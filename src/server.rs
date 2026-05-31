@@ -38,9 +38,12 @@ impl McpServer {
         protocol_version: &str,
         _client_capabilities: &Value,
     ) -> Result<Value> {
-        self.log_tool_call("initialize", &serde_json::json!({
-            "protocolVersion": protocol_version,
-        }));
+        self.log_tool_call(
+            "initialize",
+            &serde_json::json!({
+                "protocolVersion": protocol_version,
+            }),
+        );
 
         if protocol_version != "2024-11-05"
             && protocol_version != "2025-06-18"
@@ -142,7 +145,10 @@ fn load_audit_logger_from_env() -> Option<Arc<AuditLogger>> {
     match AuditLogger::new(log_dir) {
         Ok(logger) => Some(Arc::new(logger)),
         Err(err) => {
-            eprintln!("Failed to initialize audit logger from MCP_TERMINAL_LOG_DIR: {}", err);
+            eprintln!(
+                "Failed to initialize audit logger from MCP_TERMINAL_LOG_DIR: {}",
+                err
+            );
             None
         }
     }
