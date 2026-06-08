@@ -239,6 +239,7 @@ mod tests {
             timed_out: false,
             stdout_truncated: false,
             stderr_truncated: false,
+            detached_pid: None,
         };
         let filename = logger.log_command("ls", Some("/tmp"), &result);
         logger.log_tool_result(&format!("exit_code=0 timed_out=false -> {}", filename));

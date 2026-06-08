@@ -155,11 +155,15 @@ fn load_audit_logger_from_env() -> Option<Arc<AuditLogger>> {
 }
 
 fn tool_result_summary(tool_name: &str, result: &Value, tools_changed: bool) -> String {
+    // Execution results are returned as a JSON `text` content block; parse it
+    // back to a structured value for the summary line.
     let value = result
         .get("content")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.first())
-        .and_then(|item| item.get("value"));
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .and_then(|t| serde_json::from_str::<Value>(t).ok());
 
     if let Some(val) = value {
         let exit_code = val.get("exit_code").and_then(|v| v.as_i64());

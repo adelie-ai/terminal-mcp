@@ -16,6 +16,9 @@ pub struct ExecuteResult {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// PID of a detached (fire-and-forget) process. `None` for bounded execs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detached_pid: Option<u32>,
 }
 
 /// A bounded ring buffer that keeps only the last `capacity` lines.
@@ -122,7 +125,81 @@ pub const DEFAULT_MAX_LINES: usize = 200;
 /// This guards against single extremely long lines exhausting memory.
 const MAX_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
+/// Environment variables preserved when scrubbing the inherited environment.
+///
+/// Why: foreground execs would otherwise inherit the server's full environment,
+/// leaking secrets (e.g. `ANTHROPIC_API_KEY`, `AWS_*`) into every spawned
+/// command. We keep only what a normal shell session needs to function.
+const SAFE_ENV_KEYS: &[&str] = &["PATH", "HOME", "USER", "TMPDIR", "TERM", "LANG"];
+
+/// Grace period between SIGTERM and SIGKILL when terminating a timed-out group.
+#[cfg(unix)]
+const TERM_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Apply environment scrubbing to a command unless the operator opts back in to
+/// full inheritance via `MCP_TERMINAL_INHERIT_ENV=1`.
+///
+/// When scrubbing, the command starts from an empty environment plus
+/// [`SAFE_ENV_KEYS`]; caller-supplied `env_vars` are layered on afterwards by
+/// the caller, so they always win.
+fn apply_env_scrubbing(cmd: &mut Command) {
+    let inherit = std::env::var("MCP_TERMINAL_INHERIT_ENV")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if inherit {
+        return;
+    }
+    cmd.env_clear();
+    for key in SAFE_ENV_KEYS {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+}
+
+/// Place the child in its own process group / session so the whole tree can be
+/// signalled (and detached children survive) independently of the server.
+///
+/// Why: on timeout we must kill the entire group, not just the direct child,
+/// or grandchildren (e.g. a `sleep` spawned by a script) keep running. For
+/// detach mode, a fresh session disowns the child entirely.
+#[cfg(unix)]
+fn set_new_session(cmd: &mut Command) {
+    // SAFETY: `setsid` is async-signal-safe and is the canonical way to create
+    // a new session/process group between fork and exec. It touches no shared
+    // process state beyond the child's own session id.
+    unsafe {
+        cmd.pre_exec(|| {
+            // Detach into a new session; the child becomes its own group leader,
+            // so its pid doubles as the process-group id (pgid).
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn set_new_session(_cmd: &mut Command) {}
+
+/// Send `signal` to the process group led by `pid` (its pgid == pid because the
+/// child is a session/group leader). Best-effort; ignores ESRCH.
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: libc::c_int) {
+    // SAFETY: `killpg` only delivers a signal to the target process group and
+    // has no other side effects. A negative/zero pid is never passed here.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, signal);
+    }
+}
+
 /// Execute a command directly, optionally with args/stdin/cwd/timeout/max_lines.
+///
+/// When `detach` is true the process is launched fire-and-forget: a new session
+/// is created, no timeout is enforced, no output is captured, and the call
+/// returns promptly with the child's pid in [`ExecuteResult::detached_pid`].
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     command: &str,
     args: Option<&[String]>,
@@ -130,18 +207,23 @@ pub async fn execute(
     timeout_secs: Option<u64>,
     stdin_input: Option<&str>,
     max_lines: Option<usize>,
+    detach: bool,
 ) -> Result<ExecuteResult> {
     execute_inner(
         command,
         cwd,
         timeout_secs,
         max_lines,
+        detach,
         ExecuteMode::Command { args, stdin_input },
     )
     .await
 }
 
 /// Execute a shell script by piping it into `sh -s -- [args]`.
+///
+/// See [`execute`] for `detach` semantics.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_script(
     script: &str,
     args: Option<&[String]>,
@@ -149,12 +231,14 @@ pub async fn execute_script(
     timeout_secs: Option<u64>,
     max_lines: Option<usize>,
     env_vars: Option<&HashMap<String, String>>,
+    detach: bool,
 ) -> Result<ExecuteResult> {
     execute_inner(
         "sh",
         cwd,
         timeout_secs,
         max_lines,
+        detach,
         ExecuteMode::Script {
             script,
             script_args: args,
@@ -182,15 +266,22 @@ async fn execute_inner(
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
     max_lines: Option<usize>,
+    detach: bool,
     mode: ExecuteMode<'_>,
 ) -> Result<ExecuteResult> {
     if command.is_empty() {
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
     }
 
+    check_command_allowed(command)?;
+
     let timeout_secs = timeout_secs.unwrap_or(30);
 
     let mut cmd = Command::new(command);
+
+    // Scrub inherited environment before layering caller-supplied vars so the
+    // caller's values always win and secrets are never leaked by default.
+    apply_env_scrubbing(&mut cmd);
 
     let (command_args, env_vars, stdin_input) = match mode {
         ExecuteMode::Command { args, stdin_input } => (args, None, stdin_input),
@@ -219,16 +310,16 @@ async fn execute_inner(
     }
 
     if let Some(cwd) = cwd {
-        let expanded = shellexpand::tilde(cwd);
-        let cwd_path = Path::new(expanded.as_ref());
-        if !cwd_path.exists() {
-            return Err(ShellError::ExecutionFailed(format!(
-                "Working directory does not exist: {}",
-                cwd
-            ))
-            .into());
-        }
+        let cwd_path = resolve_cwd(cwd)?;
         cmd.current_dir(cwd_path);
+    }
+
+    // Place the child in its own session/process group so we can terminate the
+    // whole tree on timeout (bounded mode) or fully disown it (detach mode).
+    set_new_session(&mut cmd);
+
+    if detach {
+        return spawn_detached(&mut cmd, command);
     }
 
     if stdin_input.is_some() {
@@ -252,6 +343,11 @@ async fn execute_inner(
             .into());
         }
     };
+
+    // PID of the child, which is also the pgid of its process group (it is the
+    // group leader thanks to `setsid`). Needed to terminate the whole tree on
+    // timeout instead of leaking grandchildren.
+    let child_pid = child.id();
 
     // Write stdin if provided
     if let Some(input) = stdin_input
@@ -313,34 +409,40 @@ async fn execute_inner(
     });
 
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-    let result = tokio::time::timeout(timeout_duration, async {
-        let stdout_result = stdout_handle.await.unwrap_or_default();
-        let stderr_result = stderr_handle.await.unwrap_or_default();
-        let status = child.wait().await;
-        (stdout_result, stderr_result, status)
-    })
-    .await;
+    // Keep `child` owned by this function (not moved into the timeout future) so
+    // that on timeout we can still kill its process group.
+    let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
-    match result {
-        Ok(((stdout, stdout_truncated), (stderr, stderr_truncated), Ok(status))) => {
-            Ok(ExecuteResult {
-                exit_code: status.code().unwrap_or(-1),
-                stdout,
-                stderr,
-                timed_out: false,
-                stdout_truncated,
-                stderr_truncated,
-            })
+    match wait_result {
+        Ok(status) => {
+            // Process exited on its own; collect the buffered output.
+            let (stdout, stdout_truncated) = stdout_handle.await.unwrap_or_default();
+            let (stderr, stderr_truncated) = stderr_handle.await.unwrap_or_default();
+            match status {
+                Ok(status) => Ok(ExecuteResult {
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout,
+                    stderr,
+                    timed_out: false,
+                    stdout_truncated,
+                    stderr_truncated,
+                    detached_pid: None,
+                }),
+                Err(e) => Err(ShellError::ExecutionFailed(format!(
+                    "Failed to wait for command '{}': {}",
+                    command, e
+                ))
+                .into()),
+            }
         }
-        Ok((_, _, Err(e))) => Err(ShellError::ExecutionFailed(format!(
-            "Failed to wait for command '{}': {}",
-            command, e
-        ))
-        .into()),
         Err(_) => {
-            // Timeout - tasks will be dropped, killing pipe reads.
-            // We can't easily kill the child here since it moved into the task,
-            // but dropping the task will drop the Child, closing pipes.
+            // Timeout: terminate the entire process group (SIGTERM, grace,
+            // SIGKILL) so the child and any grandchildren are actually killed
+            // rather than leaked.
+            terminate_group(child_pid, &mut child).await;
+            // Abort the reader tasks; their pipes are now closing.
+            stdout_handle.abort();
+            stderr_handle.abort();
             Ok(ExecuteResult {
                 exit_code: -1,
                 stdout: String::new(),
@@ -348,8 +450,131 @@ async fn execute_inner(
                 timed_out: true,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                detached_pid: None,
             })
         }
+    }
+}
+
+/// Spawn a fire-and-forget process: new session, no timeout, no captured
+/// output. Returns immediately with the child's pid.
+fn spawn_detached(cmd: &mut Command, command: &str) -> Result<ExecuteResult> {
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(ShellError::CommandNotFound(command.to_string()).into());
+            }
+            return Err(ShellError::ExecutionFailed(format!(
+                "Failed to spawn command '{}': {}",
+                command, e
+            ))
+            .into());
+        }
+    };
+
+    let pid = child.id();
+    // Drop the handle without killing: the child is in its own session and is
+    // intentionally disowned. tokio's `Child` does not kill on drop by default.
+    drop(child);
+
+    Ok(ExecuteResult {
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        detached_pid: pid,
+    })
+}
+
+/// Terminate the timed-out child's process group, then reap the direct child.
+///
+/// On Unix we signal the whole group (SIGTERM, brief grace, SIGKILL). On other
+/// platforms we fall back to killing the direct child.
+async fn terminate_group(child_pid: Option<u32>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child_pid {
+            signal_group(pid, libc::SIGTERM);
+            tokio::time::sleep(TERM_GRACE).await;
+            signal_group(pid, libc::SIGKILL);
+        } else {
+            let _ = child.start_kill();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child_pid;
+        let _ = child.start_kill();
+    }
+    // Reap the direct child so it does not linger as a zombie.
+    let _ = child.wait().await;
+}
+
+/// Resolve and validate a working directory: expand `~`, canonicalize, and
+/// reject pseudo-filesystem roots that should never be a working directory.
+fn resolve_cwd(cwd: &str) -> Result<std::path::PathBuf> {
+    let expanded = shellexpand::tilde(cwd);
+    let cwd_path = Path::new(expanded.as_ref());
+    if !cwd_path.exists() {
+        return Err(ShellError::ExecutionFailed(format!(
+            "Working directory does not exist: {}",
+            cwd
+        ))
+        .into());
+    }
+    let canonical = cwd_path.canonicalize().map_err(|e| {
+        ShellError::ExecutionFailed(format!(
+            "Failed to resolve working directory '{}': {}",
+            cwd, e
+        ))
+    })?;
+    for forbidden in ["/proc", "/sys", "/dev"] {
+        if canonical == Path::new(forbidden) || canonical.starts_with(format!("{}/", forbidden)) {
+            return Err(ShellError::ExecutionFailed(format!(
+                "Refusing to use working directory under {}: {}",
+                forbidden, cwd
+            ))
+            .into());
+        }
+    }
+    Ok(canonical)
+}
+
+/// Enforce the optional command allowlist configured via
+/// `MCP_TERMINAL_ALLOWED_COMMANDS` (comma-separated). Unrestricted by default.
+fn check_command_allowed(command: &str) -> Result<()> {
+    let Ok(raw) = std::env::var("MCP_TERMINAL_ALLOWED_COMMANDS") else {
+        return Ok(());
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(());
+    }
+    // Match on the command's basename so absolute paths are handled too.
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command);
+    let allowed = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|c| c == command || c == basename);
+    if allowed {
+        Ok(())
+    } else {
+        Err(ShellError::InvalidCommand(format!(
+            "Command '{}' is not in MCP_TERMINAL_ALLOWED_COMMANDS",
+            command
+        ))
+        .into())
     }
 }
 
@@ -359,9 +584,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_execution() {
-        let result = execute("echo", Some(&["hello".to_string()]), None, None, None, None)
-            .await
-            .unwrap();
+        let result = execute(
+            "echo",
+            Some(&["hello".to_string()]),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "hello");
         assert!(result.stderr.is_empty());
@@ -377,6 +610,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -387,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_zero_exit_code() {
-        let result = execute("false", None, None, None, None, None)
+        let result = execute("false", None, None, None, None, None, false)
             .await
             .unwrap();
         assert_ne!(result.exit_code, 0);
@@ -403,6 +637,7 @@ mod tests {
             Some(1),
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -410,13 +645,82 @@ mod tests {
         assert_eq!(result.exit_code, -1);
     }
 
+    /// Regression: a bounded exec that times out must leave NO surviving
+    /// process — neither the direct child nor any grandchildren.
+    #[tokio::test]
+    async fn test_timeout_kills_process_tree() {
+        // The script spawns a grandchild `sleep` and writes its PID to a file,
+        // then sleeps itself. Both must be dead after the timeout fires.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("grandchild.pid");
+        let pid_file_str = pid_file.to_str().unwrap().to_string();
+        let script = format!("sleep 30 & echo $! > {pid_file_str}; sleep 30");
+
+        let result = execute_script(&script, None, None, Some(1), None, None, false)
+            .await
+            .unwrap();
+        assert!(result.timed_out);
+
+        // Give the kernel a moment to deliver SIGKILL and reap.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let pid_text = std::fs::read_to_string(&pid_file).expect("grandchild pid recorded");
+        let pid: i32 = pid_text.trim().parse().expect("parse pid");
+
+        // kill -0 returns an error (ESRCH) once the process is gone.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(
+            !alive,
+            "grandchild pid {pid} survived the timeout — process tree leaked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detach_returns_pid_and_survives() {
+        // Detached process should return promptly with a pid and keep running.
+        let result = execute(
+            "sleep",
+            Some(&["30".to_string()]),
+            None,
+            // A tiny timeout to prove it is ignored in detach mode.
+            Some(1),
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(!result.timed_out);
+        let pid = result.detached_pid.expect("detached pid") as i32;
+
+        // It should be alive right after returning.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(alive, "detached process should be running");
+
+        // Clean up: kill the detached process group.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+
     #[tokio::test]
     async fn test_custom_cwd() {
-        let result = execute("pwd", None, Some("/tmp"), None, None, None)
+        let result = execute("pwd", None, Some("/tmp"), None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("tmp"));
+    }
+
+    #[tokio::test]
+    async fn test_cwd_rejects_proc() {
+        let result = execute("pwd", None, Some("/proc"), None, None, None, false).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("/proc"),
+            "expected /proc rejection, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -428,6 +732,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -437,15 +742,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command() {
-        let result = execute("", None, None, None, None, None).await;
+        let result = execute("", None, None, None, None, None, false).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_stdin_piping() {
-        let result = execute("cat", None, None, None, Some("hello from stdin"), None)
-            .await
-            .unwrap();
+        let result = execute(
+            "cat",
+            None,
+            None,
+            None,
+            Some("hello from stdin"),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "hello from stdin");
     }
@@ -459,6 +772,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -477,6 +791,7 @@ mod tests {
             None,
             None,
             Some(3),
+            false,
         )
         .await
         .unwrap();
@@ -497,6 +812,7 @@ mod tests {
             None,
             None,
             Some(5),
+            false,
         )
         .await
         .unwrap();
@@ -507,9 +823,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_script_basic() {
-        let result = execute_script("echo hello\necho world", None, None, None, None, None)
-            .await
-            .unwrap();
+        let result = execute_script(
+            "echo hello\necho world",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         let lines: Vec<&str> = result.stdout.trim().lines().collect();
         assert_eq!(lines, vec!["hello", "world"]);
@@ -524,6 +848,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -535,7 +860,7 @@ mod tests {
     async fn test_execute_script_with_env_vars() {
         let mut env = HashMap::new();
         env.insert("MY_VAR".to_string(), "hello_env".to_string());
-        let result = execute_script("echo $MY_VAR", None, None, None, None, Some(&env))
+        let result = execute_script("echo $MY_VAR", None, None, None, None, Some(&env), false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -554,6 +879,7 @@ mod tests {
             None,
             None,
             Some(0),
+            false,
         )
         .await
         .unwrap();
