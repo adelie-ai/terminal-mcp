@@ -123,6 +123,10 @@ impl ToolRegistry {
             .get("max_lines")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        let detach = args
+            .get("detach")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let (result, command_desc) = if let Some(script_body) = script {
             let cmd_args: Option<Vec<String>> = args.get("args").and_then(|v| {
@@ -140,6 +144,7 @@ impl ToolRegistry {
                 timeout_secs,
                 max_lines,
                 None,
+                detach,
             )
             .await?;
 
@@ -176,6 +181,7 @@ impl ToolRegistry {
                 timeout_secs,
                 stdin_input,
                 max_lines,
+                detach,
             )
             .await?;
 
@@ -268,16 +274,12 @@ impl ToolRegistry {
                     "name": s.name,
                     "description": s.description,
                     "parameter_count": s.parameters.len(),
+                    "script_preview": script_preview(&s.script),
                 })
             })
             .collect();
 
-        Ok(serde_json::json!({
-            "content": [{
-                "type": "json",
-                "value": list
-            }]
-        }))
+        Ok(json_text_content(&Value::Array(list)))
     }
 
     async fn exec_dynamic_script(
@@ -326,6 +328,7 @@ impl ToolRegistry {
             timeout_secs,
             max_lines,
             env_ref,
+            false,
         )
         .await?;
 
@@ -345,6 +348,32 @@ impl Default for ToolRegistry {
     }
 }
 
+/// Build a short, single-line preview of a stored script body for listings.
+/// Collapses internal whitespace and truncates to ~80 chars.
+fn script_preview(script: &str) -> String {
+    const MAX: usize = 80;
+    let collapsed = script.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX {
+        let truncated: String = collapsed.chars().take(MAX).collect();
+        format!("{}…", truncated)
+    } else {
+        collapsed
+    }
+}
+
+/// Wrap a structured value as an MCP `text` content block whose text is the
+/// serialized JSON. MCP defines no `json` content type, so the payload is
+/// returned as JSON text the client can parse.
+fn json_text_content(value: &Value) -> Value {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": text
+        }]
+    })
+}
+
 fn execution_result_json(result: &ExecuteResult, audit_log_file: Option<&str>) -> Value {
     let mut value = serde_json::json!({
         "exit_code": result.exit_code,
@@ -355,16 +384,15 @@ fn execution_result_json(result: &ExecuteResult, audit_log_file: Option<&str>) -
         "stderr_truncated": result.stderr_truncated,
     });
 
+    if let Some(pid) = result.detached_pid {
+        value["detached_pid"] = Value::from(pid);
+    }
+
     if let Some(filename) = audit_log_file {
         value["audit_log_file"] = Value::String(filename.to_string());
     }
 
-    serde_json::json!({
-        "content": [{
-            "type": "json",
-            "value": value
-        }]
-    })
+    json_text_content(&value)
 }
 
 fn validate_script_name(name: &str) -> Result<()> {
@@ -389,6 +417,42 @@ fn validate_script_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Environment-variable names that must never be set from script parameters
+/// because they alter the dynamic linker / shell startup and enable code
+/// injection into the spawned process.
+const FORBIDDEN_ENV_NAMES: &[&str] =
+    &["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "IFS", "CDPATH"];
+
+/// Validate a script parameter name before it is used as an environment
+/// variable name. Names must match `[A-Za-z_][A-Za-z0-9_]*` and must not be one
+/// of the dangerous, injection-enabling variables.
+fn validate_param_name(name: &str) -> Result<()> {
+    let valid = {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            _ => false,
+        }
+    };
+    if !valid {
+        return Err(McpError::InvalidToolParameters(format!(
+            "Invalid parameter name '{}': must match [A-Za-z_][A-Za-z0-9_]*",
+            name
+        ))
+        .into());
+    }
+    if FORBIDDEN_ENV_NAMES.contains(&name) {
+        return Err(McpError::InvalidToolParameters(format!(
+            "Parameter name '{}' is not allowed (injection-enabling environment variable)",
+            name
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 fn parse_script_parameters(val: Option<&Value>) -> Result<Vec<ScriptParameter>> {
     let Some(arr) = val.and_then(|v| v.as_array()) else {
         return Ok(vec![]);
@@ -399,6 +463,7 @@ fn parse_script_parameters(val: Option<&Value>) -> Result<Vec<ScriptParameter>> 
         let name = item.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             McpError::InvalidToolParameters("Each parameter must have a 'name' string".to_string())
         })?;
+        validate_param_name(name)?;
         let description = item
             .get("description")
             .and_then(|v| v.as_str())
@@ -420,7 +485,7 @@ fn parse_script_parameters(val: Option<&Value>) -> Result<Vec<ScriptParameter>> 
 fn terminal_execute_schema() -> Value {
     serde_json::json!({
         "name": "terminal_execute",
-        "description": "Execute a shell command or script and return stdout/stderr. Use 'command' for direct execution or 'script' for multi-line shell scripts. Returns exit code, stdout, stderr, and timeout status.",
+        "description": "Execute a shell command or script and return stdout/stderr. Use 'command' for direct execution or 'script' for multi-line shell scripts. Returns exit code, stdout, stderr, and timeout status.\n\nExecution modes:\n- Bounded (default): the command runs with a timeout and its output is captured. If the timeout fires, the entire process group is terminated, so children are killed too.\n- Detach (detach=true): the command is launched fire-and-forget in a new session with NO timeout and NO captured output; the call returns immediately with 'detached_pid'. Use this only for processes meant to outlive the call (e.g. opening an app, starting a long background task).\n\nSECURITY: This tool runs arbitrary shell commands with the privileges of the user running the server. Only expose it to trusted clients. By default spawned commands do NOT inherit the server's environment (secrets are scrubbed); set MCP_TERMINAL_INHERIT_ENV=1 to opt back in. An optional allowlist can be configured via MCP_TERMINAL_ALLOWED_COMMANDS (comma-separated; unrestricted by default).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -443,7 +508,7 @@ fn terminal_execute_schema() -> Value {
                 },
                 "timeout_secs": {
                     "type": "number",
-                    "description": "Timeout in seconds. Default: 30 seconds."
+                    "description": "Timeout in seconds. Default: 30 seconds. Ignored when detach=true."
                 },
                 "stdin": {
                     "type": "string",
@@ -452,8 +517,16 @@ fn terminal_execute_schema() -> Value {
                 "max_lines": {
                     "type": "number",
                     "description": "Maximum number of lines to return for stdout and stderr (keeps the last N lines). Default: 200. Set to 0 for unlimited."
+                },
+                "detach": {
+                    "type": "boolean",
+                    "description": "Launch the process fire-and-forget in a new session: no timeout, no captured output; returns immediately with 'detached_pid'. Default: false."
                 }
-            }
+            },
+            "oneOf": [
+                { "required": ["command"] },
+                { "required": ["script"] }
+            ]
         }
     })
 }
@@ -588,6 +661,14 @@ fn dynamic_script_tool_schema(stored: &StoredScript) -> Value {
 mod tests {
     use super::*;
 
+    /// Parse the JSON payload carried in the first `text` content block.
+    fn result_value(result: &Value) -> Value {
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("text content block");
+        serde_json::from_str(text).expect("content text is JSON")
+    }
+
     #[tokio::test]
     async fn test_execute_tool_missing_command() {
         let registry = ToolRegistry::new();
@@ -617,7 +698,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!changed);
-        let val = &result["content"][0]["value"];
+        let val = result_value(&result);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello_script"));
     }
@@ -650,7 +731,7 @@ mod tests {
             .execute_tool("terminal_list_scripts", &serde_json::json!({}))
             .await
             .unwrap();
-        let scripts = &list_result["content"][0]["value"];
+        let scripts = result_value(&list_result);
         let arr = scripts.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["name"], "my_script");
@@ -675,7 +756,7 @@ mod tests {
             .execute_tool("script_greet", &serde_json::json!({}))
             .await
             .unwrap();
-        let val = &result["content"][0]["value"];
+        let val = result_value(&result);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello_dynamic"));
     }
@@ -709,6 +790,25 @@ mod tests {
             .execute_tool("script_to_remove", &serde_json::json!({}))
             .await;
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_param_name_rejected() {
+        let registry = ToolRegistry::new();
+        for bad in ["LD_PRELOAD", "BASH_ENV", "1BAD", "has-dash", "IFS"] {
+            let res = registry
+                .execute_tool(
+                    "terminal_store_script",
+                    &serde_json::json!({
+                        "name": "with_bad_param",
+                        "description": "desc",
+                        "script": "echo hi",
+                        "parameters": [{"name": bad}]
+                    }),
+                )
+                .await;
+            assert!(res.is_err(), "param name '{bad}' should be rejected");
+        }
     }
 
     #[tokio::test]
@@ -779,7 +879,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let val = &result["content"][0]["value"];
+        let val = result_value(&result);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello world"));
     }
@@ -817,7 +917,7 @@ mod tests {
             .execute_tool("script_overwrite_me", &serde_json::json!({}))
             .await
             .unwrap();
-        let val = &result["content"][0]["value"];
+        let val = result_value(&result);
         assert!(val["stdout"].as_str().unwrap().contains("v2"));
     }
 }

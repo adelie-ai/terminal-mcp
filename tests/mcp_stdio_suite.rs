@@ -114,9 +114,24 @@ impl McpStdioClient {
 
     fn tool_call(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let resp = self.call("tools/call", json!({"name":name,"arguments":arguments}))?;
-        resp.get("result")
+        let result = resp
+            .get("result")
             .cloned()
-            .ok_or_else(|| format!("missing result field: {resp}"))
+            .ok_or_else(|| format!("missing result field: {resp}"))?;
+        // Per MCP, tool failures arrive as a successful response carrying
+        // `isError: true` content; surface them as Err for the test helpers.
+        if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+            let msg = result
+                .get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("tool error")
+                .to_string();
+            return Err(msg);
+        }
+        Ok(result)
     }
 
     /// Drain and return any pending notifications collected since last call.

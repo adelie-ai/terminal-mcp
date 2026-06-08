@@ -23,3 +23,6 @@ warnings = "deny"
 
 [lints.clippy]
 all = "deny"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.186"

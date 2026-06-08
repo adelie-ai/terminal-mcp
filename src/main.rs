@@ -333,7 +333,10 @@ async fn handle_jsonrpc_message(
                         }
                         Ok(result)
                     }
-                    Err(e) => Err(e),
+                    // Per MCP, tool failures are reported as a successful
+                    // response carrying `isError: true` content, not as a
+                    // JSON-RPC protocol error.
+                    Err(e) => Ok(tool_error_result(&e.to_string())),
                 }
             } else {
                 return (
@@ -404,6 +407,19 @@ async fn handle_jsonrpc_message(
             }
         }
     }
+}
+
+/// Build an MCP tool-call result that signals failure via `isError: true`
+/// content rather than a JSON-RPC protocol error. Used for tool *execution*
+/// failures (bad command, missing param, unknown tool, etc.).
+fn tool_error_result(message: &str) -> Value {
+    serde_json::json!({
+        "isError": true,
+        "content": [{
+            "type": "text",
+            "text": message,
+        }]
+    })
 }
 
 fn jsonrpc_error_response(

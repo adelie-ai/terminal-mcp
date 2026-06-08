@@ -5,6 +5,12 @@
 use crate::error::{Result, TransportError};
 use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 
+/// Maximum accepted `Content-Length` for a single framed message.
+///
+/// Why: the body buffer is allocated up-front from this header value, so an
+/// unbounded length lets a peer trigger an out-of-memory abort with one line.
+const MAX_CONTENT_LENGTH: usize = 64 * 1024 * 1024; // 64 MiB
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StdioFraming {
     /// Detect framing based on the first successfully read message.
@@ -17,6 +23,19 @@ enum StdioFraming {
 
 fn trim_crlf(s: &str) -> &str {
     s.trim_end_matches(&['\r', '\n'][..])
+}
+
+/// Reject a declared `Content-Length` that exceeds [`MAX_CONTENT_LENGTH`]
+/// before any buffer is allocated.
+fn check_content_length(content_length: usize) -> Result<()> {
+    if content_length > MAX_CONTENT_LENGTH {
+        return Err(TransportError::InvalidMessage(format!(
+            "Content-Length {} exceeds maximum of {} bytes",
+            content_length, MAX_CONTENT_LENGTH
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn parse_content_length_header(line: &str) -> Option<usize> {
@@ -162,6 +181,10 @@ impl StdioTransportHandler {
             ))
         })?;
 
+        // Cap the declared length before allocating so a malicious or malformed
+        // header (e.g. a huge Content-Length) cannot trigger an OOM abort.
+        check_content_length(content_length)?;
+
         loop {
             let mut header_line = String::new();
             let n = self
@@ -230,5 +253,16 @@ mod tests {
     fn test_stdio_transport_handler_creation() {
         let handler = StdioTransportHandler::new();
         let _ = handler;
+    }
+
+    #[test]
+    fn test_content_length_cap() {
+        // At or under the cap is accepted.
+        assert!(check_content_length(0).is_ok());
+        assert!(check_content_length(MAX_CONTENT_LENGTH).is_ok());
+        // Over the cap is rejected as an invalid message (no allocation).
+        let err = check_content_length(MAX_CONTENT_LENGTH + 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds maximum"), "got: {msg}");
     }
 }
