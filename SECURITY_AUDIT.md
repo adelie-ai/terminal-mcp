@@ -28,10 +28,17 @@ terminal-mcp executes arbitrary shell commands by design. This is inherently hig
 
 ### 2. No Authentication on Tool Calls (ACKNOWLEDGED — HIGH)
 
-**File:** `src/main.rs`, `src/server.rs`
+**File:** `src/main.rs`, `src/service.rs` (protocol/transport now in `mcp-core`)
 
-**Status:** Acknowledged (2026-03-31). Runtime and `--help` warnings added. Auth design TBD.
-**Rationale:** WebSocket mode has no authentication. Mitigated by defaulting to localhost and printing a security warning at startup (with extra warning if binding to all interfaces). Stdio mode is unaffected (parent process controls access). Token-based auth needs design work before implementation.
+**Status:** Acknowledged (2026-03-31; revisited 2026-06-08 after the mcp-core
+migration). `--help` warning retained; auth design TBD.
+**Rationale:** WebSocket mode has no authentication. Mitigated by defaulting to
+localhost (`--host 127.0.0.1`, via mcp-core's `CommonServeArgs`) and the
+`--host` help text warning that exposing it has no auth. Stdio mode (the
+default) is unaffected — the parent process controls access. The transport is
+now owned by `mcp-core`; the previous bespoke startup-time warning print is no
+longer emitted (the `--help` warning remains). Token-based auth needs design
+work before implementation.
 
 **Recommendation:** Add token-based authentication for WebSocket mode.
 
