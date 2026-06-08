@@ -1,14 +1,19 @@
 #![deny(warnings)]
 
 // Tool registry and MCP tool definitions.
+//
+// The registry owns the dynamic script store and the optional audit logger.
+// It produces `mcp_core::ToolReply` values directly; the JSON-RPC protocol,
+// framing, transports, and `tools/list_changed` emission are owned by mcp-core
+// (see `src/service.rs`, which adapts this registry to `mcp_core::McpService`).
 
 use crate::error::{McpError, Result, ScriptError};
 use crate::operations::audit::AuditLogger;
 use crate::operations::execute::ExecuteResult;
+use mcp_core::{ToolDef, ToolReply};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// A stored script that becomes a dynamic MCP tool.
 #[derive(Clone, Debug)]
@@ -35,6 +40,15 @@ const BUILTIN_TOOLS: &[&str] = &[
     "terminal_list_scripts",
 ];
 
+/// The outcome of a tool invocation: the reply plus whether the server's tool
+/// set changed (so the service can emit `notifications/tools/list_changed`).
+pub struct ToolOutcome {
+    /// The reply to return to the client.
+    pub reply: ToolReply,
+    /// Whether this call mutated the stored-script set.
+    pub tools_changed: bool,
+}
+
 /// Registry for built-in and dynamic MCP tools.
 pub struct ToolRegistry {
     scripts: Arc<RwLock<HashMap<String, StoredScript>>>,
@@ -55,50 +69,70 @@ impl ToolRegistry {
         }
     }
 
-    /// List available tools in MCP schema format.
-    pub async fn list_tools(&self) -> Value {
+    /// List available tools: the four built-ins plus one `script_<name>` tool
+    /// per stored script (read from the current store).
+    ///
+    /// Synchronous: the store is a `std::sync::RwLock` whose critical sections
+    /// never span an `.await`, so `McpService::tools()` (a sync method) can read
+    /// it directly without bouncing through the async runtime.
+    pub fn list_tools(&self) -> Vec<ToolDef> {
         let mut tools = vec![
-            terminal_execute_schema(),
-            terminal_store_script_schema(),
-            terminal_remove_script_schema(),
-            terminal_list_scripts_schema(),
+            terminal_execute_tool(),
+            terminal_store_script_tool(),
+            terminal_remove_script_tool(),
+            terminal_list_scripts_tool(),
         ];
 
-        let scripts = self.scripts.read().await;
+        let scripts = self.scripts.read().expect("script store lock poisoned");
         for stored in scripts.values() {
-            tools.push(dynamic_script_tool_schema(stored));
+            tools.push(dynamic_script_tool(stored));
         }
 
-        Value::Array(tools)
+        tools
     }
 
-    /// Execute a tool by name and return `(result_value, tools_changed)`.
-    pub async fn execute_tool(&self, name: &str, arguments: &Value) -> Result<(Value, bool)> {
+    /// Execute a tool by name and return its [`ToolOutcome`].
+    pub async fn execute_tool(&self, name: &str, arguments: &Value) -> Result<ToolOutcome> {
         let args = arguments.as_object().ok_or_else(|| {
             McpError::InvalidToolParameters("Arguments must be an object".to_string())
         })?;
 
         match name {
             "terminal_execute" => {
-                let result = self.exec_terminal_execute(args).await?;
-                Ok((result, false))
+                let reply = self.exec_terminal_execute(args).await?;
+                Ok(ToolOutcome {
+                    reply,
+                    tools_changed: false,
+                })
             }
             "terminal_store_script" => {
-                let result = self.exec_store_script(args).await?;
-                Ok((result, true))
+                let reply = self.exec_store_script(args).await?;
+                Ok(ToolOutcome {
+                    reply,
+                    tools_changed: true,
+                })
             }
             "terminal_remove_script" => {
-                let result = self.exec_remove_script(args).await?;
-                Ok((result, true))
+                let reply = self.exec_remove_script(args).await?;
+                Ok(ToolOutcome {
+                    reply,
+                    tools_changed: true,
+                })
             }
             "terminal_list_scripts" => {
-                let result = self.exec_list_scripts().await?;
-                Ok((result, false))
+                let reply = self.exec_list_scripts().await?;
+                Ok(ToolOutcome {
+                    reply,
+                    tools_changed: false,
+                })
             }
             _ => {
                 if let Some(script_name) = name.strip_prefix("script_") {
-                    let result = self.exec_dynamic_script(script_name, args).await?;
-                    Ok((result, false))
+                    let reply = self.exec_dynamic_script(script_name, args).await?;
+                    Ok(ToolOutcome {
+                        reply,
+                        tools_changed: false,
+                    })
                 } else {
                     Err(McpError::ToolNotFound(name.to_string()).into())
                 }
@@ -106,7 +140,10 @@ impl ToolRegistry {
         }
     }
 
-    async fn exec_terminal_execute(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
+    async fn exec_terminal_execute(
+        &self,
+        args: &serde_json::Map<String, Value>,
+    ) -> Result<ToolReply> {
         let script = args.get("script").and_then(|v| v.as_str());
         let stdin_input = args.get("stdin").and_then(|v| v.as_str());
 
@@ -200,10 +237,10 @@ impl ToolRegistry {
             .as_ref()
             .map(|logger| logger.log_command(&command_desc, cwd, &result));
 
-        Ok(execution_result_json(&result, audit_log_file.as_deref()))
+        execution_result_reply(&result, audit_log_file.as_deref())
     }
 
-    async fn exec_store_script(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
+    async fn exec_store_script(&self, args: &serde_json::Map<String, Value>) -> Result<ToolReply> {
         let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             McpError::InvalidToolParameters("Missing required parameter: name".to_string())
         })?;
@@ -232,67 +269,72 @@ impl ToolRegistry {
             parameters,
         };
 
-        let mut scripts = self.scripts.write().await;
-        let overwritten = scripts.insert(name.to_string(), stored).is_some();
+        let overwritten = {
+            let mut scripts = self.scripts.write().expect("script store lock poisoned");
+            scripts.insert(name.to_string(), stored).is_some()
+        };
 
-        Ok(serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": if overwritten {
-                    format!("Script '{}' updated. Available as tool 'script_{}'.", name, name)
-                } else {
-                    format!("Script '{}' stored. Available as tool 'script_{}'.", name, name)
-                }
-            }]
-        }))
+        let message = if overwritten {
+            format!(
+                "Script '{}' updated. Available as tool 'script_{}'.",
+                name, name
+            )
+        } else {
+            format!(
+                "Script '{}' stored. Available as tool 'script_{}'.",
+                name, name
+            )
+        };
+        Ok(ToolReply::text(message))
     }
 
-    async fn exec_remove_script(&self, args: &serde_json::Map<String, Value>) -> Result<Value> {
+    async fn exec_remove_script(&self, args: &serde_json::Map<String, Value>) -> Result<ToolReply> {
         let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             McpError::InvalidToolParameters("Missing required parameter: name".to_string())
         })?;
 
-        let mut scripts = self.scripts.write().await;
-        if scripts.remove(name).is_some() {
-            Ok(serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Script '{}' removed.", name)
-                }]
-            }))
+        let removed = {
+            let mut scripts = self.scripts.write().expect("script store lock poisoned");
+            scripts.remove(name).is_some()
+        };
+        if removed {
+            Ok(ToolReply::text(format!("Script '{}' removed.", name)))
         } else {
             Err(ScriptError::NotFound(name.to_string()).into())
         }
     }
 
-    async fn exec_list_scripts(&self) -> Result<Value> {
-        let scripts = self.scripts.read().await;
-        let list: Vec<Value> = scripts
-            .values()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "parameter_count": s.parameters.len(),
-                    "script_preview": script_preview(&s.script),
+    async fn exec_list_scripts(&self) -> Result<ToolReply> {
+        let list: Vec<Value> = {
+            let scripts = self.scripts.read().expect("script store lock poisoned");
+            scripts
+                .values()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "parameter_count": s.parameters.len(),
+                        "script_preview": script_preview(&s.script),
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
 
-        Ok(json_text_content(&Value::Array(list)))
+        Ok(ToolReply::json(&Value::Array(list))?)
     }
 
     async fn exec_dynamic_script(
         &self,
         script_name: &str,
         args: &serde_json::Map<String, Value>,
-    ) -> Result<Value> {
-        let scripts = self.scripts.read().await;
-        let stored = scripts
-            .get(script_name)
-            .ok_or_else(|| ScriptError::NotFound(script_name.to_string()))?
-            .clone();
-        drop(scripts);
+    ) -> Result<ToolReply> {
+        let stored = {
+            let scripts = self.scripts.read().expect("script store lock poisoned");
+            scripts
+                .get(script_name)
+                .ok_or_else(|| ScriptError::NotFound(script_name.to_string()))?
+                .clone()
+        };
 
         // Build env vars from parameters
         let mut env_vars = HashMap::new();
@@ -338,7 +380,7 @@ impl ToolRegistry {
             .as_ref()
             .map(|logger| logger.log_command(&command_desc, cwd, &result));
 
-        Ok(execution_result_json(&result, audit_log_file.as_deref()))
+        execution_result_reply(&result, audit_log_file.as_deref())
     }
 }
 
@@ -361,20 +403,12 @@ fn script_preview(script: &str) -> String {
     }
 }
 
-/// Wrap a structured value as an MCP `text` content block whose text is the
-/// serialized JSON. MCP defines no `json` content type, so the payload is
-/// returned as JSON text the client can parse.
-fn json_text_content(value: &Value) -> Value {
-    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    serde_json::json!({
-        "content": [{
-            "type": "text",
-            "text": text
-        }]
-    })
-}
-
-fn execution_result_json(result: &ExecuteResult, audit_log_file: Option<&str>) -> Value {
+/// Build the JSON execution-result reply. The payload is carried both as
+/// pretty-printed text and as `structuredContent` (via [`ToolReply::json`]).
+fn execution_result_reply(
+    result: &ExecuteResult,
+    audit_log_file: Option<&str>,
+) -> Result<ToolReply> {
     let mut value = serde_json::json!({
         "exit_code": result.exit_code,
         "stdout": result.stdout,
@@ -392,7 +426,7 @@ fn execution_result_json(result: &ExecuteResult, audit_log_file: Option<&str>) -
         value["audit_log_file"] = Value::String(filename.to_string());
     }
 
-    json_text_content(&value)
+    Ok(ToolReply::json(&value)?)
 }
 
 fn validate_script_name(name: &str) -> Result<()> {
@@ -482,11 +516,11 @@ fn parse_script_parameters(val: Option<&Value>) -> Result<Vec<ScriptParameter>> 
     Ok(params)
 }
 
-fn terminal_execute_schema() -> Value {
-    serde_json::json!({
-        "name": "terminal_execute",
-        "description": "Execute a shell command or script and return stdout/stderr. Use 'command' for direct execution or 'script' for multi-line shell scripts. Returns exit code, stdout, stderr, and timeout status.\n\nExecution modes:\n- Bounded (default): the command runs with a timeout and its output is captured. If the timeout fires, the entire process group is terminated, so children are killed too.\n- Detach (detach=true): the command is launched fire-and-forget in a new session with NO timeout and NO captured output; the call returns immediately with 'detached_pid'. Use this only for processes meant to outlive the call (e.g. opening an app, starting a long background task).\n\nSECURITY: This tool runs arbitrary shell commands with the privileges of the user running the server. Only expose it to trusted clients. By default spawned commands do NOT inherit the server's environment (secrets are scrubbed); set MCP_TERMINAL_INHERIT_ENV=1 to opt back in. An optional allowlist can be configured via MCP_TERMINAL_ALLOWED_COMMANDS (comma-separated; unrestricted by default).",
-        "inputSchema": {
+fn terminal_execute_tool() -> ToolDef {
+    ToolDef::new(
+        "terminal_execute",
+        "Execute a shell command or script and return stdout/stderr. Use 'command' for direct execution or 'script' for multi-line shell scripts. Returns exit code, stdout, stderr, and timeout status.\n\nExecution modes:\n- Bounded (default): the command runs with a timeout and its output is captured. If the timeout fires, the entire process group is terminated, so children are killed too.\n- Detach (detach=true): the command is launched fire-and-forget in a new session with NO timeout and NO captured output; the call returns immediately with 'detached_pid'. Use this only for processes meant to outlive the call (e.g. opening an app, starting a long background task).\n\nSECURITY: This tool runs arbitrary shell commands with the privileges of the user running the server. Only expose it to trusted clients. By default spawned commands do NOT inherit the server's environment (secrets are scrubbed); set MCP_TERMINAL_INHERIT_ENV=1 to opt back in. An optional allowlist can be configured via MCP_TERMINAL_ALLOWED_COMMANDS (comma-separated; unrestricted by default).",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
@@ -527,15 +561,15 @@ fn terminal_execute_schema() -> Value {
                 { "required": ["command"] },
                 { "required": ["script"] }
             ]
-        }
-    })
+        }),
+    )
 }
 
-fn terminal_store_script_schema() -> Value {
-    serde_json::json!({
-        "name": "terminal_store_script",
-        "description": "Store a named shell script that becomes available as a dynamic tool 'script_<name>'. Scripts are session-scoped and cleared on server restart.",
-        "inputSchema": {
+fn terminal_store_script_tool() -> ToolDef {
+    ToolDef::new(
+        "terminal_store_script",
+        "Store a named shell script that becomes available as a dynamic tool 'script_<name>'. Scripts are session-scoped and cleared on server restart.",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -574,15 +608,15 @@ fn terminal_store_script_schema() -> Value {
                 }
             },
             "required": ["name", "description", "script"]
-        }
-    })
+        }),
+    )
 }
 
-fn terminal_remove_script_schema() -> Value {
-    serde_json::json!({
-        "name": "terminal_remove_script",
-        "description": "Remove a stored script, removing its dynamic tool.",
-        "inputSchema": {
+fn terminal_remove_script_tool() -> ToolDef {
+    ToolDef::new(
+        "terminal_remove_script",
+        "Remove a stored script, removing its dynamic tool.",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -591,22 +625,22 @@ fn terminal_remove_script_schema() -> Value {
                 }
             },
             "required": ["name"]
-        }
-    })
+        }),
+    )
 }
 
-fn terminal_list_scripts_schema() -> Value {
-    serde_json::json!({
-        "name": "terminal_list_scripts",
-        "description": "List all stored scripts with their names, descriptions, and parameter counts.",
-        "inputSchema": {
+fn terminal_list_scripts_tool() -> ToolDef {
+    ToolDef::new(
+        "terminal_list_scripts",
+        "List all stored scripts with their names, descriptions, and parameter counts.",
+        serde_json::json!({
             "type": "object",
             "properties": {}
-        }
-    })
+        }),
+    )
 }
 
-fn dynamic_script_tool_schema(stored: &StoredScript) -> Value {
+fn dynamic_script_tool(stored: &StoredScript) -> ToolDef {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
 
@@ -646,27 +680,36 @@ fn dynamic_script_tool_schema(stored: &StoredScript) -> Value {
         }),
     );
 
-    serde_json::json!({
-        "name": format!("script_{}", stored.name),
-        "description": stored.description,
-        "inputSchema": {
+    ToolDef::new(
+        format!("script_{}", stored.name),
+        stored.description.clone(),
+        serde_json::json!({
             "type": "object",
             "properties": properties,
             "required": required
-        }
-    })
+        }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Parse the JSON payload carried in the first `text` content block.
-    fn result_value(result: &Value) -> Value {
-        let text = result["content"][0]["text"]
-            .as_str()
-            .expect("text content block");
-        serde_json::from_str(text).expect("content text is JSON")
+    /// Parse the JSON payload carried in a reply's `structuredContent`.
+    fn outcome_value(outcome: &ToolOutcome) -> Value {
+        outcome
+            .reply
+            .structured_content
+            .clone()
+            .expect("reply carries structuredContent")
+    }
+
+    /// Return the text of a reply's first content block.
+    fn outcome_text(outcome: &ToolOutcome) -> String {
+        match outcome.reply.content.first().expect("a content block") {
+            mcp_core::Content::Text(t) => t.clone(),
+            mcp_core::Content::Raw(v) => v.to_string(),
+        }
     }
 
     #[tokio::test]
@@ -693,12 +736,12 @@ mod tests {
     async fn test_script_param_basic() {
         let registry = ToolRegistry::new();
         let args = serde_json::json!({"script": "echo hello_script"});
-        let (result, changed) = registry
+        let outcome = registry
             .execute_tool("terminal_execute", &args)
             .await
             .unwrap();
-        assert!(!changed);
-        let val = result_value(&result);
+        assert!(!outcome.tools_changed);
+        let val = outcome_value(&outcome);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello_script"));
     }
@@ -721,17 +764,17 @@ mod tests {
             "description": "A test script",
             "script": "echo stored",
         });
-        let (_, changed) = registry
+        let outcome = registry
             .execute_tool("terminal_store_script", &store_args)
             .await
             .unwrap();
-        assert!(changed);
+        assert!(outcome.tools_changed);
 
-        let (list_result, _) = registry
+        let list_outcome = registry
             .execute_tool("terminal_list_scripts", &serde_json::json!({}))
             .await
             .unwrap();
-        let scripts = result_value(&list_result);
+        let scripts = outcome_value(&list_outcome);
         let arr = scripts.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["name"], "my_script");
@@ -752,11 +795,11 @@ mod tests {
             .await
             .unwrap();
 
-        let (result, _) = registry
+        let outcome = registry
             .execute_tool("script_greet", &serde_json::json!({}))
             .await
             .unwrap();
-        let val = result_value(&result);
+        let val = outcome_value(&outcome);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello_dynamic"));
     }
@@ -776,14 +819,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, changed) = registry
+        let outcome = registry
             .execute_tool(
                 "terminal_remove_script",
                 &serde_json::json!({"name": "to_remove"}),
             )
             .await
             .unwrap();
-        assert!(changed);
+        assert!(outcome.tools_changed);
 
         // Calling removed script should fail
         let res = registry
@@ -844,12 +887,8 @@ mod tests {
             .await
             .unwrap();
 
-        let tools = registry.list_tools().await;
-        let arr = tools.as_array().unwrap();
-        let names: Vec<&str> = arr
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-            .collect();
+        let tools = registry.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"script_listed"));
     }
 
@@ -872,14 +911,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (result, _) = registry
+        let outcome = registry
             .execute_tool(
                 "script_parameterized",
                 &serde_json::json!({"GREETING": "hello", "TARGET": "world"}),
             )
             .await
             .unwrap();
-        let val = result_value(&result);
+        let val = outcome_value(&outcome);
         assert_eq!(val["exit_code"], 0);
         assert!(val["stdout"].as_str().unwrap().contains("hello world"));
     }
@@ -899,7 +938,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (store_result, _) = registry
+        let store_outcome = registry
             .execute_tool(
                 "terminal_store_script",
                 &serde_json::json!({
@@ -910,14 +949,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let text = store_result["content"][0]["text"].as_str().unwrap();
+        let text = outcome_text(&store_outcome);
         assert!(text.contains("updated"));
 
-        let (result, _) = registry
+        let outcome = registry
             .execute_tool("script_overwrite_me", &serde_json::json!({}))
             .await
             .unwrap();
-        let val = result_value(&result);
+        let val = outcome_value(&outcome);
         assert!(val["stdout"].as_str().unwrap().contains("v2"));
     }
 }

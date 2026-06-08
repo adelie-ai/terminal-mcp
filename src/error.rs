@@ -1,27 +1,28 @@
 #![deny(warnings)]
 
-// Central error types for terminal-mcp.
+// Domain error types for terminal-mcp.
+//
+// JSON-RPC / protocol / transport errors are owned by mcp-core; this module
+// covers only the server's own domain (shell execution, stored scripts, and
+// tool-parameter validation). These map onto `mcp_core::CallError` at the
+// service boundary (see `src/service.rs`).
 
 use thiserror::Error;
 
-/// Top-level error type used across the crate.
+/// Top-level domain error used across the crate.
 #[derive(Error, Debug)]
 pub enum TerminalMcpError {
     /// Shell execution errors.
     #[error("Shell error: {0}")]
     Shell(#[from] ShellError),
 
-    /// JSON serialization/deserialization errors.
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    /// MCP protocol errors.
+    /// MCP tool-dispatch errors (unknown tool, bad parameters).
     #[error("MCP protocol error: {0}")]
     Mcp(#[from] McpError),
 
-    /// Transport-layer errors.
-    #[error("Transport error: {0}")]
-    Transport(#[from] TransportError),
+    /// JSON serialization failure while building a tool reply.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 
     /// Script storage and invocation errors.
     #[error("Script error: {0}")]
@@ -64,17 +65,9 @@ pub enum ScriptError {
     InvalidName(String),
 }
 
-/// Errors related to MCP/JSON-RPC semantics.
+/// Errors related to MCP tool dispatch semantics.
 #[derive(Error, Debug)]
 pub enum McpError {
-    /// Unsupported MCP protocol version in initialize request.
-    #[error("Unsupported protocol version: {0}")]
-    InvalidProtocolVersion(String),
-
-    /// JSON-RPC message shape was invalid.
-    #[error("Invalid JSON-RPC message: {0}")]
-    InvalidJsonRpc(String),
-
     /// Requested tool name does not exist.
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
@@ -82,26 +75,6 @@ pub enum McpError {
     /// Tool parameters were missing or invalid.
     #[error("Invalid tool parameters: {0}")]
     InvalidToolParameters(String),
-}
-
-/// Transport-level framing and connection errors.
-#[derive(Error, Debug)]
-pub enum TransportError {
-    /// WebSocket connection error.
-    #[error("WebSocket connection error: {0}")]
-    WebSocket(String),
-
-    /// Incoming message framing or format was invalid.
-    #[error("Invalid message format: {0}")]
-    InvalidMessage(String),
-
-    /// Transport stream was closed by peer.
-    #[error("Connection closed")]
-    ConnectionClosed,
-
-    /// I/O error while reading or writing transport data.
-    #[error("Transport IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Convenience result alias for crate APIs.

@@ -2,29 +2,44 @@
 
 ## Runtime shape
 
-`terminal-mcp` runs as a single process with one MCP server instance:
+`terminal-mcp` runs as a single process. The JSON-RPC protocol, message
+framing, transports (stdio / unix / websocket), version negotiation, and
+`tools/list_changed` emission are owned by the shared
+[`mcp-core`](https://github.com/adelie-ai/mcp-core) crate. This crate supplies
+only the domain and an `mcp_core::McpService` adapter:
 
-- `src/main.rs` parses CLI args and selects transport mode.
-- `src/server.rs` owns MCP lifecycle state and dispatches tool calls.
-- `src/tools.rs` implements the tool registry and tool execution routing.
+- `src/main.rs` enforces the refuse-to-run-as-root guard, then hands mcp-core a
+  `ServerConfig` and the service via `mcp_core::run_simple` (mcp-core owns the
+  `serve` CLI, including `--transport`/`--mode`).
+- `src/service.rs` implements `mcp_core::McpService` (`TerminalService`): it
+  advertises the tool set, dispatches calls to the registry, maps domain errors
+  onto `mcp_core::CallError`, and does session-level audit logging.
+- `src/tools.rs` implements the tool registry (`ToolRegistry`) and tool
+  execution routing, including the dynamic `script_<name>` tools.
 - `src/operations/execute.rs` performs shell process execution.
 - `src/operations/audit.rs` implements optional audit logging.
-- `src/transport.rs` handles stdio framing and read/write behavior.
+- `src/error.rs` holds the crate's domain errors (shell / script / tool-param).
 
 ## Request flow
 
-1. Transport receives JSON-RPC message.
-2. Main loop parses JSON and calls `handle_jsonrpc_message`.
-3. MCP method is validated and dispatched to `McpServer`.
-4. Tool calls delegate to `ToolRegistry`.
-5. Execution tools call operation functions and return structured tool results.
+1. mcp-core's transport receives and frames a JSON-RPC message.
+2. mcp-core dispatches `initialize` / `tools/list` / `tools/call` / `shutdown`.
+3. `tools/list` calls `TerminalService::tools()` → `ToolRegistry::list_tools()`
+   (built-ins plus one `script_<name>` per stored script).
+4. `tools/call` calls `TerminalService::call_tool()` → `ToolRegistry`.
+5. Execution tools call operation functions and return a `ToolReply`.
+6. After a successful `terminal_store_script` / `terminal_remove_script`, the
+   reply is marked `tools_changed()` and mcp-core emits
+   `notifications/tools/list_changed`.
 
 ## State model
 
-- `McpServer` holds:
+- `TerminalService` holds:
   - tool registry (`Arc<ToolRegistry>`)
-  - initialized flag (`RwLock<bool>`)
   - optional audit logger (`Option<Arc<AuditLogger>>`)
+  - (the MCP `initialized` handshake state lives per-connection inside mcp-core)
+- `ToolRegistry` holds the dynamic script store behind a `std::sync::RwLock`
+  (its critical sections never span an `.await`, so `tools()` reads it directly).
 - Dynamic scripts are in-memory and session-scoped.
   - They are not persisted across process restarts.
 
