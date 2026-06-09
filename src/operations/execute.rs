@@ -60,9 +60,15 @@ impl TailBuffer {
         self.total_lines += 1;
         self.trailing_newline = had_newline;
         // Cap individual lines to prevent a single multi-GB line from
-        // exhausting memory.  Truncate to 1 MiB if necessary.
-        let line = if line.len() > 1_048_576 {
-            &line[..1_048_576]
+        // exhausting memory.  Truncate to at most 1 MiB if necessary, backing
+        // up to a char boundary so the slice cannot panic (or split a
+        // multibyte character) when byte MAX_LINE_BYTES lands mid-character.
+        let line = if line.len() > MAX_LINE_BYTES {
+            let mut end = MAX_LINE_BYTES;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            &line[..end]
         } else {
             line
         };
@@ -124,6 +130,10 @@ pub const DEFAULT_MAX_LINES: usize = 200;
 /// Maximum total bytes stored in a TailBuffer before further lines are dropped.
 /// This guards against single extremely long lines exhausting memory.
 const MAX_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
+/// Maximum bytes kept from a single line; longer lines are truncated at a
+/// char boundary at or below this many bytes.
+const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Environment variables preserved when scrubbing the inherited environment.
 ///
@@ -878,10 +888,13 @@ mod tests {
         let mut buf = TailBuffer::new(0);
         buf.push(&line, true);
         let (out, _truncated) = buf.finish();
-        assert!(out.len() <= 1_048_576, "line must be capped to 1 MiB");
-        assert!(!out.is_empty(), "truncation must not drop the line");
+        // finish() restores the trailing newline; the line itself must be
+        // capped to 1 MiB and contain only whole characters.
+        let line_out = out.trim_end_matches('\n');
+        assert!(line_out.len() <= 1_048_576, "line must be capped to 1 MiB");
+        assert!(!line_out.is_empty(), "truncation must not drop the line");
         assert!(
-            out.chars().all(|c| c == '€'),
+            line_out.chars().all(|c| c == '€'),
             "truncation must not produce partial characters"
         );
     }
