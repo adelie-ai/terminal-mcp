@@ -34,7 +34,13 @@ async fn main() -> mcp_core::Result<()> {
         // The dynamic script set changes at runtime (terminal_store_script /
         // terminal_remove_script), so advertise listChanged and let mcp-core
         // emit notifications/tools/list_changed after those calls.
-        .tools_list_changed(true);
+        .tools_list_changed(true)
+        // MF-12: refuse the websocket transport. terminal-mcp executes
+        // arbitrary shell commands and mcp-core's websocket transport is
+        // unauthenticated, so `serve --transport websocket --host 0.0.0.0`
+        // would hand a remote shell to anyone who can reach the port. The
+        // server is stdio-served in practice.
+        .without_websocket();
 
     // The service owns the shared script store and the optional audit logger;
     // building it is fallible (a misconfigured MCP_TERMINAL_LOG_DIR is an

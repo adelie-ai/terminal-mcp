@@ -5,9 +5,12 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-# `websocket` retains the prior `--mode websocket` transport (axum lives behind
-# this mcp-core feature, not as a direct dep here); `unix` is on by default.
-mcp-core = { git = "https://github.com/adelie-ai/mcp-core", features = ["websocket"] }
+# The websocket transport is deliberately NOT compiled in (and is additionally
+# refused via `ServerConfig::without_websocket`): terminal-mcp executes
+# arbitrary shell commands and mcp-core's ws transport is unauthenticated, so
+# `serve --transport websocket --host 0.0.0.0` would be a remote shell.
+# `unix` is on by default.
+mcp-core = { git = "https://github.com/adelie-ai/mcp-core" }
 clap = { version = "4.5.54", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -60,9 +60,15 @@ impl TailBuffer {
         self.total_lines += 1;
         self.trailing_newline = had_newline;
         // Cap individual lines to prevent a single multi-GB line from
-        // exhausting memory.  Truncate to 1 MiB if necessary.
-        let line = if line.len() > 1_048_576 {
-            &line[..1_048_576]
+        // exhausting memory.  Truncate to at most 1 MiB if necessary, backing
+        // up to a char boundary so the slice cannot panic (or split a
+        // multibyte character) when byte MAX_LINE_BYTES lands mid-character.
+        let line = if line.len() > MAX_LINE_BYTES {
+            let mut end = MAX_LINE_BYTES;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            &line[..end]
         } else {
             line
         };
@@ -124,6 +130,10 @@ pub const DEFAULT_MAX_LINES: usize = 200;
 /// Maximum total bytes stored in a TailBuffer before further lines are dropped.
 /// This guards against single extremely long lines exhausting memory.
 const MAX_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
+/// Maximum bytes kept from a single line; longer lines are truncated at a
+/// char boundary at or below this many bytes.
+const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Environment variables preserved when scrubbing the inherited environment.
 ///
@@ -865,6 +875,40 @@ mod tests {
             .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "hello_env");
+    }
+
+    /// MF-11: a single line longer than the 1 MiB per-line cap whose byte
+    /// 1_048_576 falls in the middle of a multibyte character must be
+    /// truncated at a char boundary, not panic. '€' is 3 bytes and
+    /// 1_048_576 % 3 == 1, so the naive `&line[..1_048_576]` slice lands
+    /// mid-character.
+    #[test]
+    fn test_overlong_multibyte_line_truncated_at_char_boundary() {
+        let line = "€".repeat(350_000); // 1_050_000 bytes, > 1 MiB
+        let mut buf = TailBuffer::new(0);
+        buf.push(&line, true);
+        let (out, _truncated) = buf.finish();
+        // finish() restores the trailing newline; the line itself must be
+        // capped to 1 MiB and contain only whole characters.
+        let line_out = out.trim_end_matches('\n');
+        assert!(line_out.len() <= 1_048_576, "line must be capped to 1 MiB");
+        assert!(!line_out.is_empty(), "truncation must not drop the line");
+        assert!(
+            line_out.chars().all(|c| c == '€'),
+            "truncation must not produce partial characters"
+        );
+    }
+
+    /// MF-11 companion: the same cap in ring-buffer (capacity > 0) mode.
+    #[test]
+    fn test_overlong_multibyte_line_truncated_in_ring_mode() {
+        let line = "€".repeat(350_000);
+        let mut buf = TailBuffer::new(2);
+        buf.push("short", true);
+        buf.push(&line, true);
+        let (out, _truncated) = buf.finish();
+        assert!(out.starts_with("short\n"));
+        assert!(out.len() <= 1_048_576 + "short\n".len());
     }
 
     #[tokio::test]
