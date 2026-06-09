@@ -867,6 +867,37 @@ mod tests {
         assert_eq!(result.stdout.trim(), "hello_env");
     }
 
+    /// MF-11: a single line longer than the 1 MiB per-line cap whose byte
+    /// 1_048_576 falls in the middle of a multibyte character must be
+    /// truncated at a char boundary, not panic. '€' is 3 bytes and
+    /// 1_048_576 % 3 == 1, so the naive `&line[..1_048_576]` slice lands
+    /// mid-character.
+    #[test]
+    fn test_overlong_multibyte_line_truncated_at_char_boundary() {
+        let line = "€".repeat(350_000); // 1_050_000 bytes, > 1 MiB
+        let mut buf = TailBuffer::new(0);
+        buf.push(&line, true);
+        let (out, _truncated) = buf.finish();
+        assert!(out.len() <= 1_048_576, "line must be capped to 1 MiB");
+        assert!(!out.is_empty(), "truncation must not drop the line");
+        assert!(
+            out.chars().all(|c| c == '€'),
+            "truncation must not produce partial characters"
+        );
+    }
+
+    /// MF-11 companion: the same cap in ring-buffer (capacity > 0) mode.
+    #[test]
+    fn test_overlong_multibyte_line_truncated_in_ring_mode() {
+        let line = "€".repeat(350_000);
+        let mut buf = TailBuffer::new(2);
+        buf.push("short", true);
+        buf.push(&line, true);
+        let (out, _truncated) = buf.finish();
+        assert!(out.starts_with("short\n"));
+        assert!(out.len() <= 1_048_576 + "short\n".len());
+    }
+
     #[tokio::test]
     async fn test_max_lines_zero_means_unlimited() {
         let result = execute(
