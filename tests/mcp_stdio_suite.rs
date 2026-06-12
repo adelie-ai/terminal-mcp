@@ -232,10 +232,7 @@ fn run_case(f: impl FnOnce(&mut McpStdioClient)) {
 fn terminal_execute_simple_command() {
     run_case(|client| {
         let res = client
-            .tool_call(
-                "terminal_execute",
-                json!({"command": "echo", "args": ["hello"]}),
-            )
+            .tool_call("terminal_execute", json!({"command": "echo hello"}))
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
@@ -251,10 +248,7 @@ fn terminal_execute_simple_command() {
 fn terminal_execute_capture_stderr() {
     run_case(|client| {
         let res = client
-            .tool_call(
-                "terminal_execute",
-                json!({"command": "sh", "args": ["-c", "echo err >&2"]}),
-            )
+            .tool_call("terminal_execute", json!({"command": "echo err >&2"}))
             .unwrap();
         let v = extract_value(&res);
         assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
@@ -275,6 +269,30 @@ fn terminal_execute_non_zero_exit() {
         let v = extract_value(&res);
         assert_ne!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
         assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(false));
+    });
+}
+
+#[test]
+fn terminal_execute_runs_multiword_via_shell() {
+    // Regression: a natural `{"command": "<prog> <args>"}` must word-split and
+    // run through `sh -c`, not look for a binary literally named "<prog> <args>"
+    // (the bug that made `pacman -Qm`, `echo $PATH`, etc. fail). $VAR expansion
+    // also confirms a real shell is involved.
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "echo first second && echo \"home=$HOME\""}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
+        let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap();
+        assert!(stdout.contains("first second"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("home=/"),
+            "expected $HOME expansion: {stdout}"
+        );
     });
 }
 
@@ -301,7 +319,7 @@ fn terminal_execute_timeout() {
         let res = client
             .tool_call(
                 "terminal_execute",
-                json!({"command": "sleep", "args": ["10"], "timeout_secs": 1}),
+                json!({"command": "sleep 10", "timeout_secs": 1}),
             )
             .unwrap();
         let v = extract_value(&res);
@@ -316,7 +334,8 @@ fn terminal_execute_with_args() {
         let res = client
             .tool_call(
                 "terminal_execute",
-                json!({"command": "echo", "args": ["one", "two", "three"]}),
+                // `args` become the shell's positional parameters $1, $2, $3.
+                json!({"command": "echo \"$1 $2 $3\"", "args": ["one", "two", "three"]}),
             )
             .unwrap();
         let v = extract_value(&res);
@@ -349,11 +368,23 @@ fn terminal_execute_stdin_piping() {
 #[test]
 fn terminal_execute_command_not_found() {
     run_case(|client| {
-        let res = client.tool_call(
-            "terminal_execute",
-            json!({"command": "nonexistent_command_xyz_12345"}),
+        // Command mode runs via `sh -c`, so a missing program is reported by the
+        // shell as exit code 127 (not a spawn error: we always spawn `sh`).
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "nonexistent_command_xyz_12345"}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(127));
+        assert!(
+            v.get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .to_lowercase()
+                .contains("not found")
         );
-        expect_err_contains(res, "not found");
     });
 }
 
@@ -398,7 +429,7 @@ fn terminal_execute_max_lines_truncation() {
         let res = client
             .tool_call(
                 "terminal_execute",
-                json!({"command": "sh", "args": ["-c", "for i in $(seq 1 10); do echo line$i; done"], "max_lines": 3}),
+                json!({"command": "for i in $(seq 1 10); do echo line$i; done", "max_lines": 3}),
             )
             .unwrap();
         let v = extract_value(&res);
@@ -442,7 +473,7 @@ fn terminal_execute_max_lines_zero_unlimited() {
         let res = client
             .tool_call(
                 "terminal_execute",
-                json!({"command": "sh", "args": ["-c", "for i in $(seq 1 300); do echo line$i; done"], "max_lines": 0}),
+                json!({"command": "for i in $(seq 1 300); do echo line$i; done", "max_lines": 0}),
             )
             .unwrap();
         let v = extract_value(&res);
