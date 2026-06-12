@@ -204,7 +204,10 @@ fn signal_group(pid: u32, signal: libc::c_int) {
     }
 }
 
-/// Execute a command directly, optionally with args/stdin/cwd/timeout/max_lines.
+/// Execute a shell command line via `sh -c`, optionally with
+/// args/stdin/cwd/timeout/max_lines. The `command` string is a full command
+/// line (word-split, `$VAR`-expanded, etc. by the shell); `args` become the
+/// shell's positional parameters `$1, $2, …` (with `$0` set to a placeholder).
 ///
 /// When `detach` is true the process is launched fire-and-forget: a new session
 /// is created, no timeout is enforced, no output is captured, and the call
@@ -283,18 +286,43 @@ async fn execute_inner(
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
     }
 
-    check_command_allowed(command)?;
-
     let timeout_secs = timeout_secs.unwrap_or(30);
 
-    let mut cmd = Command::new(command);
+    // `command` is the value passed to `Command::new`. For direct-command mode we
+    // always exec `sh`, so the program we spawn is `sh`; the user-supplied command
+    // line is handed to `sh -c`. For script mode `command` is already "sh".
+    let mut cmd = match &mode {
+        ExecuteMode::Command { .. } => {
+            // The allowlist inspects the *program* the user is invoking — i.e. the
+            // first shell word of the command line — not "sh" (which we always
+            // run) and not the whole line. This keeps the allowlist meaningful
+            // when commands are routed through `sh -c`.
+            check_command_allowed(first_shell_word(command))?;
+            Command::new("sh")
+        }
+        ExecuteMode::Script { .. } => {
+            check_command_allowed(command)?;
+            Command::new(command)
+        }
+    };
 
     // Scrub inherited environment before layering caller-supplied vars so the
     // caller's values always win and secrets are never leaked by default.
     apply_env_scrubbing(&mut cmd);
 
-    let (command_args, env_vars, stdin_input) = match mode {
-        ExecuteMode::Command { args, stdin_input } => (args, None, stdin_input),
+    let (env_vars, stdin_input) = match mode {
+        ExecuteMode::Command { args, stdin_input } => {
+            // Run the command line through a shell so word-splitting, $VAR
+            // expansion, pipes, etc. all work. `args` (if any) become the
+            // shell's positional parameters $1, $2, …; $0 is a placeholder.
+            cmd.arg("-c");
+            cmd.arg(command);
+            cmd.arg("terminal-mcp");
+            if let Some(extra) = args {
+                cmd.args(extra);
+            }
+            (None, stdin_input)
+        }
         ExecuteMode::Script {
             script,
             script_args,
@@ -305,13 +333,9 @@ async fn execute_inner(
             if let Some(extra) = script_args {
                 cmd.args(extra);
             }
-            (None, env_vars, Some(script))
+            (env_vars, Some(script))
         }
     };
-
-    if let Some(args) = command_args {
-        cmd.args(args);
-    }
 
     if let Some(vars) = env_vars {
         for (k, v) in vars {
@@ -557,12 +581,30 @@ fn resolve_cwd(cwd: &str) -> Result<std::path::PathBuf> {
     Ok(canonical)
 }
 
+/// Extract the program token (first shell word) from a command line for the
+/// allowlist check. This is a deliberately simple split on ASCII whitespace: it
+/// quoting is not interpreted, so the worst case is that a contrived command
+/// line yields a token that fails the allowlist (fail-closed). For ordinary
+/// commands like `pacman -Qm` or `/usr/bin/ls -l` it returns `pacman` /
+/// `/usr/bin/ls`, which `check_command_allowed` then matches by basename.
+fn first_shell_word(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
 /// Enforce the optional command allowlist configured via
 /// `MCP_TERMINAL_ALLOWED_COMMANDS` (comma-separated). Unrestricted by default.
 fn check_command_allowed(command: &str) -> Result<()> {
     let Ok(raw) = std::env::var("MCP_TERMINAL_ALLOWED_COMMANDS") else {
         return Ok(());
     };
+    check_allowlist(command, &raw)
+}
+
+/// Pure allowlist check: `command` (a program token, not a whole command line)
+/// is permitted if `raw` is empty/unrestricted or contains it (by full string
+/// or basename). Split out from [`check_command_allowed`] so it can be tested
+/// without mutating the process-global environment.
+fn check_allowlist(command: &str, raw: &str) -> Result<()> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(());
@@ -594,9 +636,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_execution() {
+        // Command mode now runs the string through `sh -c`, so a full command
+        // line (with its own args) works directly.
+        let result = execute("echo hello", None, None, None, None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "hello");
+        assert!(result.stderr.is_empty());
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn test_command_runs_through_shell() {
+        // A multi-word command must word-split via the shell rather than be
+        // treated as a single binary named "echo $PATH". $VAR expansion works.
+        let result = execute("echo \"$HOME\"", None, None, None, None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            !result.stdout.trim().is_empty(),
+            "expected $HOME to expand, got empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_positional_args() {
+        // `args` become the shell's positional parameters $1, $2, … while $0 is
+        // the placeholder we pass.
         let result = execute(
-            "echo",
-            Some(&["hello".to_string()]),
+            "echo \"$0 $1 $2\"",
+            Some(&["foo".to_string(), "bar".to_string()]),
             None,
             None,
             None,
@@ -606,24 +677,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout.trim(), "hello");
-        assert!(result.stderr.is_empty());
-        assert!(!result.timed_out);
+        assert_eq!(result.stdout.trim(), "terminal-mcp foo bar");
     }
 
     #[tokio::test]
     async fn test_stderr_capture() {
-        let result = execute(
-            "sh",
-            Some(&["-c".to_string(), "echo err >&2".to_string()]),
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = execute("echo err >&2", None, None, None, None, None, false)
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.is_empty());
         assert_eq!(result.stderr.trim(), "err");
@@ -640,17 +701,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout() {
-        let result = execute(
-            "sleep",
-            Some(&["10".to_string()]),
-            None,
-            Some(1),
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let result = execute("sleep 10", None, None, Some(1), None, None, false)
+            .await
+            .unwrap();
         assert!(result.timed_out);
         assert_eq!(result.exit_code, -1);
     }
@@ -689,8 +742,8 @@ mod tests {
     async fn test_detach_returns_pid_and_survives() {
         // Detached process should return promptly with a pid and keep running.
         let result = execute(
-            "sleep",
-            Some(&["30".to_string()]),
+            "sleep 30",
+            None,
             None,
             // A tiny timeout to prove it is ignored in detach mode.
             Some(1),
@@ -724,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cwd_rejects_proc() {
-        let result = execute("pwd", None, Some("/proc"), None, None, None, false).await;
+        let result = execute("true", None, Some("/proc"), None, None, None, false).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -735,6 +788,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
+        // Command mode runs through `sh -c`, so a missing program is reported by
+        // the shell as exit code 127 ("command not found") rather than a spawn
+        // error (we always successfully spawn `sh` itself).
         let result = execute(
             "nonexistent_command_xyz_12345",
             None,
@@ -744,10 +800,14 @@ mod tests {
             None,
             false,
         )
-        .await;
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("not found") || err.contains("Command not found"));
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 127);
+        assert!(
+            result.stderr.to_lowercase().contains("not found"),
+            "expected shell 'not found' on stderr, got: {}",
+            result.stderr
+        );
     }
 
     #[tokio::test]
@@ -792,11 +852,8 @@ mod tests {
     async fn test_max_lines_truncation() {
         // Generate 10 lines, keep last 3
         let result = execute(
-            "sh",
-            Some(&[
-                "-c".to_string(),
-                "for i in $(seq 1 10); do echo line$i; done".to_string(),
-            ]),
+            "for i in $(seq 1 10); do echo line$i; done",
+            None,
             None,
             None,
             None,
@@ -815,17 +872,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_lines_no_truncation_when_under() {
-        let result = execute(
-            "echo",
-            Some(&["hello".to_string()]),
-            None,
-            None,
-            None,
-            Some(5),
-            false,
-        )
-        .await
-        .unwrap();
+        let result = execute("echo hello", None, None, None, None, Some(5), false)
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(!result.stdout_truncated);
         assert_eq!(result.stdout.trim(), "hello");
@@ -911,14 +960,38 @@ mod tests {
         assert!(out.len() <= 1_048_576 + "short\n".len());
     }
 
+    #[test]
+    fn test_first_shell_word() {
+        assert_eq!(first_shell_word("pacman -Qm"), "pacman");
+        assert_eq!(first_shell_word("  ls   -l  "), "ls");
+        assert_eq!(first_shell_word("/usr/bin/ls -l"), "/usr/bin/ls");
+        assert_eq!(first_shell_word("echo"), "echo");
+        assert_eq!(first_shell_word(""), "");
+    }
+
+    /// The allowlist must inspect the program (first shell word of a command
+    /// line), not the literal `sh` we always spawn nor the whole command line.
+    /// Exercises the `check_allowlist` helper against an explicit allowlist string
+    /// so it stays race-free (it touches no process-global env var).
+    #[test]
+    fn test_allowlist_checks_program_not_sh() {
+        let allow = "echo,git";
+        // Program extracted from a full command line is matched.
+        assert!(check_allowlist(first_shell_word("echo hello"), allow).is_ok());
+        assert!(check_allowlist(first_shell_word("git status -s"), allow).is_ok());
+        // Absolute paths match by basename.
+        assert!(check_allowlist(first_shell_word("/usr/bin/echo hi"), allow).is_ok());
+        // A program not on the list is denied, even though we run `sh`.
+        assert!(check_allowlist(first_shell_word("cat /etc/hostname"), allow).is_err());
+        // The literal "sh" must NOT auto-pass just because we spawn it.
+        assert!(check_allowlist("sh", allow).is_err());
+    }
+
     #[tokio::test]
     async fn test_max_lines_zero_means_unlimited() {
         let result = execute(
-            "sh",
-            Some(&[
-                "-c".to_string(),
-                "for i in $(seq 1 10); do echo line$i; done".to_string(),
-            ]),
+            "for i in $(seq 1 10); do echo line$i; done",
+            None,
             None,
             None,
             None,

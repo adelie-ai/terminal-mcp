@@ -525,16 +525,16 @@ fn terminal_execute_tool() -> ToolDef {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute. This is the program name (e.g., 'ls', 'git', 'python3'). Mutually exclusive with 'script'."
+                    "description": "A shell command line, run via `sh -c` (e.g. `pacman -Qm`, `echo $PATH`, `ls /usr/bin/pacman`). Word-splitting, $VAR expansion, pipes, and redirection all work. Use `args` for positional parameters $1, $2, .... Provide exactly one of `command` or `script`."
                 },
                 "args": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Arguments to pass to the command (or positional args $1, $2, ... when using 'script')."
+                    "description": "Positional parameters passed to the shell as $1, $2, ... (for both `command` and `script` modes; $0 is a placeholder)."
                 },
                 "script": {
                     "type": "string",
-                    "description": "A shell script to execute via 'sh -s'. Mutually exclusive with 'command' and 'stdin'. Use this for multi-line scripts instead of 'sh -c'."
+                    "description": "A multi-line shell script to execute via `sh -s`. Provide exactly one of `command` or `script`. Mutually exclusive with `stdin`."
                 },
                 "cwd": {
                     "type": "string",
@@ -556,11 +556,7 @@ fn terminal_execute_tool() -> ToolDef {
                     "type": "boolean",
                     "description": "Launch the process fire-and-forget in a new session: no timeout, no captured output; returns immediately with 'detached_pid'. Default: false."
                 }
-            },
-            "oneOf": [
-                { "required": ["command"] },
-                { "required": ["script"] }
-            ]
+            }
         }),
     )
 }
