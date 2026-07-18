@@ -8,7 +8,8 @@
 // refuse-to-run-as-root guard, then hands mcp-core a `ServerConfig` and the
 // `TerminalService`.
 
-use mcp_core::{ServerConfig, run_simple};
+use mcp_core::run_simple;
+use terminal_mcp::server_config;
 use terminal_mcp::service::TerminalService;
 
 #[tokio::main]
@@ -30,17 +31,10 @@ async fn main() -> mcp_core::Result<()> {
         }
     }
 
-    let config = ServerConfig::new("terminal-mcp", env!("CARGO_PKG_VERSION"))
-        // The dynamic script set changes at runtime (terminal_store_script /
-        // terminal_remove_script), so advertise listChanged and let mcp-core
-        // emit notifications/tools/list_changed after those calls.
-        .tools_list_changed(true)
-        // MF-12: refuse the websocket transport. terminal-mcp executes
-        // arbitrary shell commands and mcp-core's websocket transport is
-        // unauthenticated, so `serve --transport websocket --host 0.0.0.0`
-        // would hand a remote shell to anyone who can reach the port. The
-        // server is stdio-served in practice.
-        .without_websocket();
+    // Server-level identity, transport policy, and the model-facing
+    // `instructions` blurb live in `terminal_mcp::server_config` so they are
+    // unit tested; see that function for the rationale behind each setting.
+    let config = server_config();
 
     // The service owns the shared script store and the optional audit logger;
     // building it is fallible (a misconfigured MCP_TERMINAL_LOG_DIR is an
