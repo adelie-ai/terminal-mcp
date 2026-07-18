@@ -13,6 +13,13 @@ pub mod tools;
 
 use mcp_core::ServerConfig;
 
+/// Server-level MCP `instructions`: the model-facing hint returned from
+/// `initialize` (and captured by the daemon as this server's searchable
+/// description). It frames what the server does, when to reach for it, the key
+/// tools by name, and the safety/config note the model needs before running
+/// shell.
+pub const SERVER_INSTRUCTIONS: &str = "Runs shell commands and scripts on the local machine and returns their exit code, stdout, and stderr. Reach for this whenever a request means actually doing something on this computer -- checking system or package state, listing or editing files, running a build or test, git operations, or launching an app -- rather than answering from memory. `terminal_execute` runs a one-off command or a multi-line script (with args, a working directory, a timeout, stdin, or detach=true to launch a long-running process fire-and-forget); `terminal_store_script`, `terminal_list_scripts`, and `terminal_remove_script` save reusable named scripts that appear as their own `script_<name>` tools until the server restarts. Commands run arbitrary shell as the server's non-root user and, by default, do not inherit its environment (secrets are scrubbed unless MCP_TERMINAL_INHERIT_ENV=1); an optional MCP_TERMINAL_ALLOWED_COMMANDS allowlist can restrict what may run.";
+
 /// Build the [`ServerConfig`] handed to mcp-core at startup.
 ///
 /// Centralised here (rather than inline in `main`) so the wiring is unit
@@ -27,6 +34,7 @@ pub fn server_config() -> ServerConfig {
     ServerConfig::new("terminal-mcp", env!("CARGO_PKG_VERSION"))
         .tools_list_changed(true)
         .without_websocket()
+        .instructions(SERVER_INSTRUCTIONS)
 }
 
 #[cfg(test)]
