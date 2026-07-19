@@ -11,6 +11,8 @@ pub mod operations;
 pub mod service;
 pub mod tools;
 
+pub use service::TerminalService;
+
 use mcp_core::ServerConfig;
 
 /// Server-level MCP `instructions`: the model-facing hint returned from
@@ -35,6 +37,22 @@ pub fn server_config() -> ServerConfig {
         .tools_list_changed(true)
         .without_websocket()
         .instructions(SERVER_INSTRUCTIONS)
+}
+
+/// Construct the Service with built-in defaults for in-process hosting (da#538 Phase C).
+///
+/// Zero-config: this returns the same [`TerminalService`] the standalone binary
+/// builds with no special flags. terminal-mcp has no construction-time CLI
+/// flags -- its only knob is the optional audit sink, wired from
+/// `MCP_TERMINAL_LOG_DIR` when that points at a usable directory and absent
+/// otherwise -- so this is the single default-construction path shared by the
+/// binary and any in-process host.
+///
+/// Fallible only when `MCP_TERMINAL_LOG_DIR` is set but its directory cannot be
+/// opened for logging: a misconfigured audit sink surfaces as an error rather
+/// than being silently dropped.
+pub fn build_service() -> std::io::Result<TerminalService> {
+    TerminalService::from_env()
 }
 
 #[cfg(test)]
