@@ -40,6 +40,23 @@ pub fn server_config() -> ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcp_core::McpService;
+
+    /// Acceptance (da#538 Phase C): the crate exposes a zero-config
+    /// `build_service` constructor that yields a ready service with the
+    /// built-in defaults -- the audit logger is absent unless
+    /// `MCP_TERMINAL_LOG_DIR` points at a usable directory -- and that service
+    /// advertises the built-in `terminal_execute` tool. This is the single
+    /// default-construction path an in-process host calls.
+    #[test]
+    fn build_service_exposes_builtin_tools_with_defaults() {
+        let service = build_service().expect("build_service must succeed with built-in defaults");
+        let tool_names: Vec<String> = service.tools().into_iter().map(|t| t.name).collect();
+        assert!(
+            tool_names.iter().any(|n| n == "terminal_execute"),
+            "default service must advertise the built-in terminal_execute tool, got {tool_names:?}"
+        );
+    }
 
     #[test]
     fn server_config_has_nonempty_instructions() {
