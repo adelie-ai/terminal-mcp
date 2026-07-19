@@ -11,6 +11,8 @@ pub mod operations;
 pub mod service;
 pub mod tools;
 
+pub use service::TerminalService;
+
 use mcp_core::ServerConfig;
 
 /// Server-level MCP `instructions`: the model-facing hint returned from
@@ -37,9 +39,42 @@ pub fn server_config() -> ServerConfig {
         .instructions(SERVER_INSTRUCTIONS)
 }
 
+/// Construct the Service with built-in defaults for in-process hosting (da#538 Phase C).
+///
+/// Zero-config: this returns the same [`TerminalService`] the standalone binary
+/// builds with no special flags. terminal-mcp has no construction-time CLI
+/// flags -- its only knob is the optional audit sink, wired from
+/// `MCP_TERMINAL_LOG_DIR` when that points at a usable directory and absent
+/// otherwise -- so this is the single default-construction path shared by the
+/// binary and any in-process host.
+///
+/// Fallible only when `MCP_TERMINAL_LOG_DIR` is set but its directory cannot be
+/// opened for logging: a misconfigured audit sink surfaces as an error rather
+/// than being silently dropped.
+pub fn build_service() -> std::io::Result<TerminalService> {
+    TerminalService::from_env()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcp_core::McpService;
+
+    /// Acceptance (da#538 Phase C): the crate exposes a zero-config
+    /// `build_service` constructor that yields a ready service with the
+    /// built-in defaults -- the audit logger is absent unless
+    /// `MCP_TERMINAL_LOG_DIR` points at a usable directory -- and that service
+    /// advertises the built-in `terminal_execute` tool. This is the single
+    /// default-construction path an in-process host calls.
+    #[test]
+    fn build_service_exposes_builtin_tools_with_defaults() {
+        let service = build_service().expect("build_service must succeed with built-in defaults");
+        let tool_names: Vec<String> = service.tools().into_iter().map(|t| t.name).collect();
+        assert!(
+            tool_names.iter().any(|n| n == "terminal_execute"),
+            "default service must advertise the built-in terminal_execute tool, got {tool_names:?}"
+        );
+    }
 
     #[test]
     fn server_config_has_nonempty_instructions() {

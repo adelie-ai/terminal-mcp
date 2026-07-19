@@ -9,8 +9,7 @@
 // `TerminalService`.
 
 use mcp_core::run_simple;
-use terminal_mcp::server_config;
-use terminal_mcp::service::TerminalService;
+use terminal_mcp::{build_service, server_config};
 
 #[tokio::main]
 async fn main() -> mcp_core::Result<()> {
@@ -37,7 +36,8 @@ async fn main() -> mcp_core::Result<()> {
     let config = server_config();
 
     // The service owns the shared script store and the optional audit logger;
-    // building it is fallible (a misconfigured MCP_TERMINAL_LOG_DIR is an
-    // error), so it is constructed inside the build closure.
-    run_simple(config, || async { Ok(TerminalService::from_env()?) }).await
+    // `build_service` is the crate's single zero-config construction path (it
+    // wires the audit logger from MCP_TERMINAL_LOG_DIR), and it is fallible
+    // when that sink is misconfigured, so it is called inside the build closure.
+    run_simple(config, || async { Ok(build_service()?) }).await
 }
