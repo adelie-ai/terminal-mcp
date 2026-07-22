@@ -6,7 +6,9 @@ use crate::error::{Result, ShellError};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Notify;
 
 #[derive(Debug, Serialize)]
 pub struct ExecuteResult {
@@ -212,12 +214,18 @@ fn signal_group(pid: u32, signal: libc::c_int) {
 /// When `detach` is true the process is launched fire-and-forget: a new session
 /// is created, no timeout is enforced, no output is captured, and the call
 /// returns promptly with the child's pid in [`ExecuteResult::detached_pid`].
+///
+/// `inactivity_timeout_secs` is an optional secondary cap that kills the command
+/// after that many seconds without any stdout/stderr output. `None` or `0`
+/// disables it, leaving only the absolute `timeout_secs`. It is ignored in
+/// detach mode (no output is captured to observe).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     command: &str,
     args: Option<&[String]>,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    inactivity_timeout_secs: Option<u64>,
     stdin_input: Option<&str>,
     max_lines: Option<usize>,
     detach: bool,
@@ -226,6 +234,7 @@ pub async fn execute(
         command,
         cwd,
         timeout_secs,
+        inactivity_timeout_secs,
         max_lines,
         detach,
         ExecuteMode::Command { args, stdin_input },
@@ -235,13 +244,14 @@ pub async fn execute(
 
 /// Execute a shell script by piping it into `sh -s -- [args]`.
 ///
-/// See [`execute`] for `detach` semantics.
+/// See [`execute`] for `detach` and `inactivity_timeout_secs` semantics.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_script(
     script: &str,
     args: Option<&[String]>,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    inactivity_timeout_secs: Option<u64>,
     max_lines: Option<usize>,
     env_vars: Option<&HashMap<String, String>>,
     detach: bool,
@@ -250,6 +260,7 @@ pub async fn execute_script(
         "sh",
         cwd,
         timeout_secs,
+        inactivity_timeout_secs,
         max_lines,
         detach,
         ExecuteMode::Script {
@@ -274,10 +285,12 @@ enum ExecuteMode<'a> {
 }
 
 /// Inner execution function shared by direct command and script execution paths.
+#[allow(clippy::too_many_arguments)]
 async fn execute_inner(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    inactivity_timeout_secs: Option<u64>,
     max_lines: Option<usize>,
     detach: bool,
     mode: ExecuteMode<'_>,
@@ -287,6 +300,8 @@ async fn execute_inner(
     }
 
     let timeout_secs = timeout_secs.unwrap_or(30);
+    // `0`/`None` disables inactivity checking, leaving only the absolute cap.
+    let inactivity_secs = inactivity_timeout_secs.unwrap_or(0);
 
     // `command` is the value passed to `Command::new`. For direct-command mode we
     // always exec `sh`, so the program we spawn is `sh`; the user-supplied command
@@ -402,7 +417,13 @@ async fn execute_inner(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
+    // Shared "activity" signal: each line read from either pipe pokes it, which
+    // resets the inactivity watcher's window. Cheap even when inactivity
+    // checking is disabled (a poke with no waiter just stores one permit).
+    let activity = Arc::new(Notify::new());
+
     let stdout_max = max_lines;
+    let stdout_activity = activity.clone();
     let stdout_handle = tokio::spawn(async move {
         let mut buf = TailBuffer::new(stdout_max);
         if let Some(out) = stdout_pipe {
@@ -413,6 +434,7 @@ async fn execute_inner(
                 match reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
+                        stdout_activity.notify_one();
                         let had_newline = line.ends_with('\n');
                         buf.push(line.trim_end_matches('\n'), had_newline);
                     }
@@ -423,6 +445,7 @@ async fn execute_inner(
     });
 
     let stderr_max = max_lines;
+    let stderr_activity = activity.clone();
     let stderr_handle = tokio::spawn(async move {
         let mut buf = TailBuffer::new(stderr_max);
         if let Some(err) = stderr_pipe {
@@ -433,6 +456,7 @@ async fn execute_inner(
                 match reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
+                        stderr_activity.notify_one();
                         let had_newline = line.ends_with('\n');
                         buf.push(line.trim_end_matches('\n'), had_newline);
                     }
@@ -443,12 +467,21 @@ async fn execute_inner(
     });
 
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-    // Keep `child` owned by this function (not moved into the timeout future) so
-    // that on timeout we can still kill its process group.
-    let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
+    // Race the child's own exit against the absolute timeout and the (optional)
+    // inactivity timeout. `child` stays owned by this function (only borrowed by
+    // `wait()`) so that on any timeout we can still kill its process group.
+    let outcome = {
+        let wait = child.wait();
+        tokio::pin!(wait);
+        tokio::select! {
+            status = &mut wait => WaitOutcome::Exited(status),
+            _ = tokio::time::sleep(timeout_duration) => WaitOutcome::AbsoluteTimeout,
+            _ = wait_for_inactivity(&activity, inactivity_secs) => WaitOutcome::InactivityTimeout,
+        }
+    };
 
-    match wait_result {
-        Ok(status) => {
+    match outcome {
+        WaitOutcome::Exited(status) => {
             // Process exited on its own; collect the buffered output.
             let (stdout, stdout_truncated) = stdout_handle.await.unwrap_or_default();
             let (stderr, stderr_truncated) = stderr_handle.await.unwrap_or_default();
@@ -469,24 +502,75 @@ async fn execute_inner(
                 .into()),
             }
         }
-        Err(_) => {
-            // Timeout: terminate the entire process group (SIGTERM, grace,
-            // SIGKILL) so the child and any grandchildren are actually killed
-            // rather than leaked.
+        // Either timeout: terminate the entire process group (SIGTERM, grace,
+        // SIGKILL) so the child and any grandchildren are actually killed rather
+        // than leaked, then abort the readers (their pipes are now closing).
+        WaitOutcome::AbsoluteTimeout => {
             terminate_group(child_pid, &mut child).await;
-            // Abort the reader tasks; their pipes are now closing.
             stdout_handle.abort();
             stderr_handle.abort();
-            Ok(ExecuteResult {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: format!("Command timed out after {} seconds", timeout_secs),
-                timed_out: true,
-                stdout_truncated: false,
-                stderr_truncated: false,
-                detached_pid: None,
-            })
+            Ok(timeout_result(format!(
+                "Command timed out after {} seconds",
+                timeout_secs
+            )))
         }
+        WaitOutcome::InactivityTimeout => {
+            terminate_group(child_pid, &mut child).await;
+            stdout_handle.abort();
+            stderr_handle.abort();
+            Ok(timeout_result(format!(
+                "Command timed out after {} seconds of inactivity (no output)",
+                inactivity_secs
+            )))
+        }
+    }
+}
+
+/// Outcome of racing the child's exit against the two timeouts.
+enum WaitOutcome {
+    /// The child exited on its own; carries the wait status.
+    Exited(std::io::Result<std::process::ExitStatus>),
+    /// The absolute wall-clock timeout (`timeout_secs`) elapsed.
+    AbsoluteTimeout,
+    /// No stdout/stderr output for `inactivity_timeout_secs` seconds.
+    InactivityTimeout,
+}
+
+/// Resolve once no activity (a line read from stdout/stderr) has occurred for
+/// `secs` seconds. When `secs == 0` inactivity checking is disabled and this
+/// future never resolves, so it drops out of the `select!` race harmlessly.
+///
+/// Why the loop: each `notify` from a reader wins the inner race and restarts a
+/// fresh window, so a chatty command that never falls silent for a full window
+/// is never killed. Because a `Notified` future is always registered as a waiter
+/// while we sit in the inner `select!`, a poke can never be lost mid-wait; a
+/// poke between iterations is retained as a permit and consumed immediately.
+async fn wait_for_inactivity(activity: &Notify, secs: u64) {
+    if secs == 0 {
+        // Disabled: park forever so this branch never wins the race.
+        std::future::pending::<()>().await;
+        return;
+    }
+    let window = std::time::Duration::from_secs(secs);
+    loop {
+        tokio::select! {
+            _ = activity.notified() => continue,
+            _ = tokio::time::sleep(window) => return,
+        }
+    }
+}
+
+/// Build the [`ExecuteResult`] for a timed-out command: no captured output, a
+/// `-1` exit code, `timed_out` set, and the supplied explanation on stderr.
+fn timeout_result(stderr: String) -> ExecuteResult {
+    ExecuteResult {
+        exit_code: -1,
+        stdout: String::new(),
+        stderr,
+        timed_out: true,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        detached_pid: None,
     }
 }
 
@@ -638,7 +722,7 @@ mod tests {
     async fn test_basic_execution() {
         // Command mode now runs the string through `sh -c`, so a full command
         // line (with its own args) works directly.
-        let result = execute("echo hello", None, None, None, None, None, false)
+        let result = execute("echo hello", None, None, None, None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -651,7 +735,7 @@ mod tests {
     async fn test_command_runs_through_shell() {
         // A multi-word command must word-split via the shell rather than be
         // treated as a single binary named "echo $PATH". $VAR expansion works.
-        let result = execute("echo \"$HOME\"", None, None, None, None, None, false)
+        let result = execute("echo \"$HOME\"", None, None, None, None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -672,6 +756,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .await
@@ -682,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_capture() {
-        let result = execute("echo err >&2", None, None, None, None, None, false)
+        let result = execute("echo err >&2", None, None, None, None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -692,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_zero_exit_code() {
-        let result = execute("false", None, None, None, None, None, false)
+        let result = execute("false", None, None, None, None, None, None, false)
             .await
             .unwrap();
         assert_ne!(result.exit_code, 0);
@@ -701,11 +786,87 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout() {
-        let result = execute("sleep 10", None, None, Some(1), None, None, false)
+        let result = execute("sleep 10", None, None, Some(1), None, None, None, false)
             .await
             .unwrap();
         assert!(result.timed_out);
         assert_eq!(result.exit_code, -1);
+    }
+
+    /// A silent command is killed by the inactivity cap well before the (much
+    /// larger) absolute cap, and the message names inactivity.
+    #[tokio::test]
+    async fn test_inactivity_timeout_fires_on_silence() {
+        let result = execute("sleep 3", None, None, Some(10), Some(1), None, None, false)
+            .await
+            .unwrap();
+        assert!(result.timed_out);
+        assert_eq!(result.exit_code, -1);
+        assert!(
+            result.stderr.contains("inactivity"),
+            "expected an inactivity message, got: {}",
+            result.stderr
+        );
+    }
+
+    /// Output resets the inactivity clock: a line every 0.3s never leaves a full
+    /// 1s of silence, so the command runs to completion despite the 1s cap.
+    #[tokio::test]
+    async fn test_inactivity_reset_by_output() {
+        let result = execute_script(
+            "for i in 1 2 3 4 5; do echo tick$i; sleep 0.3; done",
+            None,
+            None,
+            Some(10),
+            Some(1),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!result.timed_out);
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("tick5"),
+            "expected the command to finish, got: {}",
+            result.stdout
+        );
+    }
+
+    /// When the absolute cap is the shorter of the two it fires first even while
+    /// the command is chatty, and the message must NOT be labeled inactivity.
+    #[tokio::test]
+    async fn test_absolute_timeout_beats_inactivity_and_omits_label() {
+        let result = execute(
+            "while true; do echo busy; sleep 0.2; done",
+            None,
+            None,
+            Some(1),
+            Some(10),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(result.timed_out);
+        assert!(
+            !result.stderr.contains("inactivity"),
+            "absolute timeout must not be labeled inactivity: {}",
+            result.stderr
+        );
+    }
+
+    /// `Some(0)` explicitly disables inactivity checking: a silent command that
+    /// finishes within the absolute cap completes normally.
+    #[tokio::test]
+    async fn test_inactivity_zero_disables_check() {
+        let result = execute("sleep 1", None, None, Some(10), Some(0), None, None, false)
+            .await
+            .unwrap();
+        assert!(!result.timed_out);
+        assert_eq!(result.exit_code, 0);
     }
 
     /// Regression: a bounded exec that times out must leave NO surviving
@@ -719,7 +880,7 @@ mod tests {
         let pid_file_str = pid_file.to_str().unwrap().to_string();
         let script = format!("sleep 30 & echo $! > {pid_file_str}; sleep 30");
 
-        let result = execute_script(&script, None, None, Some(1), None, None, false)
+        let result = execute_script(&script, None, None, Some(1), None, None, None, false)
             .await
             .unwrap();
         assert!(result.timed_out);
@@ -749,6 +910,7 @@ mod tests {
             Some(1),
             None,
             None,
+            None,
             true,
         )
         .await
@@ -768,7 +930,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_cwd() {
-        let result = execute("pwd", None, Some("/tmp"), None, None, None, false)
+        let result = execute("pwd", None, Some("/tmp"), None, None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -777,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cwd_rejects_proc() {
-        let result = execute("true", None, Some("/proc"), None, None, None, false).await;
+        let result = execute("true", None, Some("/proc"), None, None, None, None, false).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -798,6 +960,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .await
@@ -812,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command() {
-        let result = execute("", None, None, None, None, None, false).await;
+        let result = execute("", None, None, None, None, None, None, false).await;
         assert!(result.is_err());
     }
 
@@ -820,6 +983,7 @@ mod tests {
     async fn test_stdin_piping() {
         let result = execute(
             "cat",
+            None,
             None,
             None,
             None,
@@ -842,6 +1006,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .await;
@@ -853,6 +1018,7 @@ mod tests {
         // Generate 10 lines, keep last 3
         let result = execute(
             "for i in $(seq 1 10); do echo line$i; done",
+            None,
             None,
             None,
             None,
@@ -872,7 +1038,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_lines_no_truncation_when_under() {
-        let result = execute("echo hello", None, None, None, None, Some(5), false)
+        let result = execute("echo hello", None, None, None, None, None, Some(5), false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -884,6 +1050,7 @@ mod tests {
     async fn test_execute_script_basic() {
         let result = execute_script(
             "echo hello\necho world",
+            None,
             None,
             None,
             None,
@@ -907,6 +1074,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .await
@@ -919,7 +1087,7 @@ mod tests {
     async fn test_execute_script_with_env_vars() {
         let mut env = HashMap::new();
         env.insert("MY_VAR".to_string(), "hello_env".to_string());
-        let result = execute_script("echo $MY_VAR", None, None, None, None, Some(&env), false)
+        let result = execute_script("echo $MY_VAR", None, None, None, None, None, Some(&env), false)
             .await
             .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -991,6 +1159,7 @@ mod tests {
     async fn test_max_lines_zero_means_unlimited() {
         let result = execute(
             "for i in $(seq 1 10); do echo line$i; done",
+            None,
             None,
             None,
             None,

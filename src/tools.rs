@@ -156,6 +156,9 @@ impl ToolRegistry {
 
         let cwd = args.get("cwd").and_then(|v| v.as_str());
         let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+        let inactivity_timeout_secs = args
+            .get("inactivity_timeout_secs")
+            .and_then(|v| v.as_u64());
         let max_lines = args
             .get("max_lines")
             .and_then(|v| v.as_u64())
@@ -179,6 +182,7 @@ impl ToolRegistry {
                 cmd_args.as_deref(),
                 cwd,
                 timeout_secs,
+                inactivity_timeout_secs,
                 max_lines,
                 None,
                 detach,
@@ -216,6 +220,7 @@ impl ToolRegistry {
                 cmd_args.as_deref(),
                 cwd,
                 timeout_secs,
+                inactivity_timeout_secs,
                 stdin_input,
                 max_lines,
                 detach,
@@ -368,6 +373,7 @@ impl ToolRegistry {
             None,
             cwd,
             timeout_secs,
+            None, // dynamic scripts don't expose inactivity timeout yet
             max_lines,
             env_ref,
             false,
@@ -542,7 +548,11 @@ fn terminal_execute_tool() -> ToolDef {
                 },
                 "timeout_secs": {
                     "type": "number",
-                    "description": "Timeout in seconds. Default: 30 seconds. Ignored when detach=true."
+                    "description": "Absolute wall-clock timeout in seconds. Default: 30 seconds. Ignored when detach=true."
+                },
+                "inactivity_timeout_secs": {
+                    "type": "number",
+                    "description": "Kill the command if it produces no stdout/stderr output for this many seconds. Independent of (and evaluated alongside) the absolute timeout_secs; whichever cap is reached first fires. Any output resets the clock, so a command that keeps producing output runs until the absolute timeout. Omit or set to 0 to disable. Ignored when detach=true."
                 },
                 "stdin": {
                     "type": "string",
