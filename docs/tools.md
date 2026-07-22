@@ -26,7 +26,11 @@ Executes either:
 - `args: string[]` (optional)
 - `script: string` (mutually exclusive with `command` and `stdin`)
 - `cwd: string` (optional)
-- `timeout_secs: number` (optional, default `30`)
+- `timeout_secs: number` (optional, default `30`) - absolute wall-clock cap
+- `inactivity_timeout_secs: number` (optional, `0`/omitted disables) - kills the
+  command after this many seconds with no stdout/stderr output. Any output
+  resets the clock, so a command that keeps talking runs until `timeout_secs`.
+  Whichever cap is reached first fires; ignored when `detach=true`.
 - `stdin: string` (optional, mutually exclusive with `script`)
 - `max_lines: number` (optional, default `200`, `0` for unlimited)
 
@@ -37,7 +41,8 @@ Executes either:
 - `exit_code: number`
 - `stdout: string`
 - `stderr: string`
-- `timed_out: boolean`
+- `timed_out: boolean` (set for either the absolute or the inactivity cap; when
+  it was the inactivity cap, `stderr` says so)
 - `stdout_truncated: boolean`
 - `stderr_truncated: boolean`
 - `audit_log_file: string` (only when audit logging is enabled)
