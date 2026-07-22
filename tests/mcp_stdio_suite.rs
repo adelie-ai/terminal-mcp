@@ -328,6 +328,104 @@ fn terminal_execute_timeout() {
     });
 }
 
+/// Acceptance: an inactivity timeout with no absolute cap kills a command that
+/// falls silent, even though the default absolute timeout (30s) has not elapsed.
+#[test]
+fn terminal_execute_inactivity_timeout_kills_on_silence() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                // No output for 3s; inactivity cap of 1s must fire first.
+                json!({"command": "sleep 3", "inactivity_timeout_secs": 1}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(-1));
+        let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap();
+        assert!(
+            stderr.contains("inactivity"),
+            "expected an inactivity-timeout message, got: {stderr}"
+        );
+    });
+}
+
+/// Acceptance: output resets the inactivity clock, so a command that keeps
+/// talking (gaps shorter than the inactivity window) runs to completion.
+#[test]
+fn terminal_execute_inactivity_reset_by_output() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({
+                    // ~1.5s total, a line every 0.3s: never silent for a full 1s.
+                    "script": "for i in 1 2 3 4 5; do echo tick$i; sleep 0.3; done",
+                    "inactivity_timeout_secs": 1
+                }),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(v.get("exit_code").and_then(|x| x.as_i64()), Some(0));
+        assert!(
+            v.get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .contains("tick5"),
+            "expected the command to finish and emit tick5"
+        );
+    });
+}
+
+/// Acceptance: when both caps are set, the absolute timeout still fires first if
+/// it is the shorter one, even while the command is actively producing output.
+#[test]
+fn terminal_execute_absolute_timeout_beats_active_output() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({
+                    // Chatty forever; absolute 1s must win over inactivity 10s.
+                    "command": "while true; do echo busy; sleep 0.2; done",
+                    "timeout_secs": 1,
+                    "inactivity_timeout_secs": 10
+                }),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(true));
+        let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap();
+        assert!(
+            !stderr.contains("inactivity"),
+            "absolute timeout should have fired, not inactivity: {stderr}"
+        );
+    });
+}
+
+/// Acceptance: when both caps are set, the inactivity timeout wins if the
+/// command falls silent before the (longer) absolute timeout would fire.
+#[test]
+fn terminal_execute_inactivity_beats_absolute_on_silence() {
+    run_case(|client| {
+        let res = client
+            .tool_call(
+                "terminal_execute",
+                json!({"command": "sleep 5", "timeout_secs": 10, "inactivity_timeout_secs": 1}),
+            )
+            .unwrap();
+        let v = extract_value(&res);
+        assert_eq!(v.get("timed_out").and_then(|x| x.as_bool()), Some(true));
+        let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap();
+        assert!(
+            stderr.contains("inactivity"),
+            "expected inactivity timeout to win, got: {stderr}"
+        );
+    });
+}
+
 #[test]
 fn terminal_execute_with_args() {
     run_case(|client| {
