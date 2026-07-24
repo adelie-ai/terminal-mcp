@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Run tests inside a Rust container
-FROM rust:1.92-trixie
+FROM rust:1.97-trixie
 WORKDIR /repo
 
 # Cache deps first
