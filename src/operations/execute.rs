@@ -1087,9 +1087,18 @@ mod tests {
     async fn test_execute_script_with_env_vars() {
         let mut env = HashMap::new();
         env.insert("MY_VAR".to_string(), "hello_env".to_string());
-        let result = execute_script("echo $MY_VAR", None, None, None, None, None, Some(&env), false)
-            .await
-            .unwrap();
+        let result = execute_script(
+            "echo $MY_VAR",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&env),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "hello_env");
     }
