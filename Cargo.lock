@@ -318,7 +318,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "mcp-core"
 version = "0.1.0"
-source = "git+https://github.com/adelie-ai/mcp-core#448b0e4a3e4dbfb04d56423d41077f0b114e6143"
+source = "git+https://github.com/adelie-ai/mcp-core#1a1df7545dbf2964b74f6e5fc1febf0d1e59df16"
 dependencies = [
  "async-trait",
  "clap",
