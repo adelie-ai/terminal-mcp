@@ -156,9 +156,7 @@ impl ToolRegistry {
 
         let cwd = args.get("cwd").and_then(|v| v.as_str());
         let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
-        let inactivity_timeout_secs = args
-            .get("inactivity_timeout_secs")
-            .and_then(|v| v.as_u64());
+        let inactivity_timeout_secs = args.get("inactivity_timeout_secs").and_then(|v| v.as_u64());
         let max_lines = args
             .get("max_lines")
             .and_then(|v| v.as_u64())
