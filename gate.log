@@ -1,0 +1,231 @@
+    Blocking waiting for file lock on package cache
+    Updating crates.io index
+    Updating mcp-core v0.1.0 (https://github.com/adelie-ai/mcp-core#1a1df754) -> #be1bbcf4
+note: pass `--verbose` to see 38 unchanged dependencies behind latest
+=== fmt ===
+=== clippy ===
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+    Checking cfg-if v1.0.4
+    Checking utf8parse v0.2.2
+   Compiling serde_core v1.0.228
+   Compiling parking_lot_core v0.9.12
+    Checking is_terminal_polyfill v1.70.2
+    Checking scopeguard v1.2.0
+    Checking smallvec v1.15.1
+    Checking anstyle v1.0.14
+   Compiling getrandom v0.4.2
+   Compiling zmij v1.0.21
+    Checking anstyle-query v1.1.5
+    Checking colorchoice v1.0.5
+    Checking option-ext v0.2.0
+   Compiling serde_json v1.0.149
+    Checking clap_lex v1.1.0
+   Compiling serde v1.0.228
+   Compiling thiserror v2.0.18
+    Checking strsim v0.11.1
+   Compiling heck v0.5.0
+    Checking bytes v1.11.1
+    Checking pin-project-lite v0.2.17
+    Checking memchr v2.8.0
+    Checking itoa v1.0.18
+   Compiling rustix v1.1.4
+    Checking bitflags v2.11.1
+    Checking linux-raw-sys v0.12.1
+    Checking once_cell v1.21.4
+    Checking fastrand v2.4.1
+    Checking lock_api v0.4.14
+    Checking anstyle-parse v1.0.0
+    Checking anstream v1.0.0
+    Checking clap_builder v4.6.0
+    Checking errno v0.3.14
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking dirs-sys v0.5.0
+    Checking signal-hook-registry v1.4.8
+    Checking dirs v6.0.0
+   Compiling syn v2.0.117
+    Checking uuid v1.23.1
+    Checking parking_lot v0.12.5
+    Checking shellexpand v3.1.2
+    Checking tempfile v3.27.0
+   Compiling tokio-macros v2.7.0
+   Compiling clap_derive v4.6.1
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+    Checking tokio v1.52.1
+    Checking clap v4.6.1
+    Checking mcp-core v0.1.0 (https://github.com/adelie-ai/mcp-core#be1bbcf4)
+    Checking terminal-mcp v0.1.0 (/home/dave/Projects/adelie-ai/.worktrees/terminal-mcp/mcp-core-bump)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.31s
+=== test ===
+   Compiling cfg-if v1.0.4
+   Compiling utf8parse v0.2.2
+   Compiling scopeguard v1.2.0
+   Compiling smallvec v1.15.1
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling strsim v0.11.1
+   Compiling option-ext v0.2.0
+   Compiling clap_lex v1.1.0
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+   Compiling bytes v1.11.1
+   Compiling pin-project-lite v0.2.17
+   Compiling bitflags v2.11.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+   Compiling lock_api v0.4.14
+   Compiling anstyle-parse v1.0.0
+   Compiling anstream v1.0.0
+   Compiling clap_builder v4.6.0
+   Compiling rustix v1.1.4
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling getrandom v0.4.2
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling dirs-sys v0.5.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling uuid v1.23.1
+   Compiling dirs v6.0.0
+   Compiling shellexpand v3.1.2
+   Compiling parking_lot v0.12.5
+   Compiling tokio v1.52.1
+   Compiling tempfile v3.27.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling clap v4.6.1
+   Compiling mcp-core v0.1.0 (https://github.com/adelie-ai/mcp-core#be1bbcf4)
+   Compiling terminal-mcp v0.1.0 (/home/dave/Projects/adelie-ai/.worktrees/terminal-mcp/mcp-core-bump)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.37s
+     Running unittests src/lib.rs (target/debug/deps/terminal_mcp-328021a97d28db5b)
+
+running 46 tests
+test operations::audit::tests::test_format_timestamp ... ok
+test operations::audit::tests::test_summarize_arguments ... ok
+test operations::execute::tests::test_allowlist_checks_program_not_sh ... ok
+test operations::audit::tests::test_audit_logger_creates_files ... ok
+test operations::execute::tests::test_first_shell_word ... ok
+test operations::execute::tests::test_cwd_rejects_proc ... ok
+test tests::server_config_has_nonempty_instructions ... ok
+test tests::server_instructions_name_tools_and_safety_note ... ok
+test tests::build_service_exposes_builtin_tools_with_defaults ... ok
+test operations::execute::tests::test_basic_execution ... ok
+test tools::tests::test_tool_not_found ... ok
+test operations::execute::tests::test_command_not_found ... ok
+test operations::execute::tests::test_command_positional_args ... ok
+test operations::execute::tests::test_overlong_multibyte_line_truncated_in_ring_mode ... ok
+test tools::tests::test_remove_script ... ok
+test tools::tests::test_invalid_script_name ... ok
+test tools::tests::test_script_and_stdin_mutually_exclusive ... ok
+test tools::tests::test_dangerous_param_name_rejected ... ok
+test tools::tests::test_execute_tool_missing_command ... ok
+test operations::execute::tests::test_overlong_multibyte_line_truncated_at_char_boundary ... ok
+test tools::tests::test_store_and_list_scripts ... ok
+test tools::tests::test_dynamic_tool_appears_in_list ... ok
+test operations::execute::tests::test_command_runs_through_shell ... ok
+test operations::execute::tests::test_stdin_piping ... ok
+test operations::execute::tests::test_non_zero_exit_code ... ok
+test operations::execute::tests::test_max_lines_zero_means_unlimited ... ok
+test operations::execute::tests::test_execute_script_with_env_vars ... ok
+test operations::execute::tests::test_empty_command ... ok
+test operations::execute::tests::test_invalid_cwd ... ok
+test tools::tests::test_store_and_call_dynamic_script ... ok
+test tools::tests::test_script_overwrite ... ok
+test operations::execute::tests::test_max_lines_truncation ... ok
+test tools::tests::test_script_with_parameters ... ok
+test tools::tests::test_script_param_basic ... ok
+test operations::execute::tests::test_execute_script_basic ... ok
+test operations::execute::tests::test_custom_cwd ... ok
+test operations::execute::tests::test_detach_returns_pid_and_survives ... ok
+test operations::execute::tests::test_stderr_capture ... ok
+test operations::execute::tests::test_max_lines_no_truncation_when_under ... ok
+test operations::execute::tests::test_execute_script_with_args ... ok
+test operations::execute::tests::test_inactivity_zero_disables_check ... ok
+test operations::execute::tests::test_absolute_timeout_beats_inactivity_and_omits_label ... ok
+test operations::execute::tests::test_inactivity_timeout_fires_on_silence ... ok
+test operations::execute::tests::test_timeout ... ok
+test operations::execute::tests::test_timeout_kills_process_tree ... ok
+test operations::execute::tests::test_inactivity_reset_by_output ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
+
+     Running unittests src/main.rs (target/debug/deps/terminal_mcp-dfe0cd16276e732e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp_stdio_suite.rs (target/debug/deps/mcp_stdio_suite-277f2cb39eef57c1)
+
+running 39 tests
+test list_changed_notification_after_store ... ok
+test terminal_execute_missing_command_param ... ok
+test terminal_execute_capture_stderr ... ok
+test initialize_reports_list_changed_true ... ok
+test remove_nonexistent_script_errors ... ok
+test invalid_script_name_rejected ... ok
+test stored_script_missing_required_param ... ok
+test builtin_tools_present_in_list ... ok
+test call_stored_script_by_dynamic_name ... ok
+test duplicate_script_name_overwrites ... ok
+test list_changed_notification_after_remove ... ok
+test list_scripts_returns_stored_scripts ... ok
+test terminal_execute_max_lines_truncation ... ok
+test terminal_execute_empty_command ... ok
+test stored_script_with_parameters_sets_env_vars ... ok
+test audit_logging_disabled_omits_audit_log_file ... ok
+test remove_script_disappears_from_tools_list ... ok
+test store_script_appears_in_tools_list ... ok
+test terminal_execute_command_not_found ... ok
+test terminal_execute_invalid_cwd ... ok
+test terminal_execute_script_param_basic ... ok
+test terminal_execute_script_and_stdin_error ... ok
+test terminal_execute_custom_cwd ... ok
+test terminal_execute_tool_not_found ... ok
+test audit_logging_writes_session_and_command_logs ... ok
+test terminal_execute_max_lines_default_not_truncated ... ok
+test terminal_execute_script_with_cwd ... ok
+test terminal_execute_script_with_args ... ok
+test terminal_execute_runs_multiword_via_shell ... ok
+test terminal_execute_with_args ... ok
+test terminal_execute_non_zero_exit ... ok
+test terminal_execute_simple_command ... ok
+test terminal_execute_stdin_piping ... ok
+test terminal_execute_max_lines_zero_unlimited ... ok
+test terminal_execute_inactivity_timeout_kills_on_silence ... ok
+test terminal_execute_inactivity_beats_absolute_on_silence ... ok
+test terminal_execute_absolute_timeout_beats_active_output ... ok
+test terminal_execute_timeout ... ok
+test terminal_execute_inactivity_reset_by_output ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+     Running tests/ws_transport_refused.rs (target/debug/deps/ws_transport_refused-a88b976b3b4ceeb1)
+
+running 1 test
+test serve_websocket_is_refused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests terminal_mcp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
