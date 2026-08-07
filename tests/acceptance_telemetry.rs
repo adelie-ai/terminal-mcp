@@ -16,6 +16,21 @@ use support::capture_dispatch;
 /// caller supplied.
 const SENTINEL: &str = "MARKER-terminal-secret-9f3d1c2a";
 
+/// The metrics registry [`mcp_core::telemetry::metrics`] records into is
+/// process-global, and `cargo test` runs a file's tests concurrently by
+/// default. Every test below either runs a `terminal_execute` call (a writer)
+/// or reads the registry (a reader) or both, so two tests running at once can
+/// inflate each other's before/after delta. This guards every test in the
+/// file so they run one at a time relative to each other; it holds no data of
+/// its own.
+static METRICS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_metrics() -> std::sync::MutexGuard<'static, ()> {
+    METRICS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// AC (epic D10 / mcp-core#40): no command line, argument, or working
 /// directory reaches a span field or an INFO-or-louder line.
 ///
@@ -24,6 +39,7 @@ const SENTINEL: &str = "MARKER-terminal-secret-9f3d1c2a";
 /// because nothing was instrumented.
 #[test]
 fn tool_call_records_no_arguments() {
+    let _guard = lock_metrics();
     let dir = tempfile::tempdir().expect("tempdir for a sentinel-bearing cwd");
     let cwd_marker = dir.path().join(format!("cwd-{SENTINEL}"));
     std::fs::create_dir(&cwd_marker).expect("create sentinel-bearing cwd");
@@ -88,6 +104,7 @@ fn tool_call_records_no_arguments() {
 /// labelled `outcome=ok`, and records its latency.
 #[test]
 fn terminal_execute_records_ok_outcome_metric() {
+    let _guard = lock_metrics();
     let ok_labels = [Label::new("outcome", "ok")];
     let calls_before = counter_total("terminal.execute", &ok_labels);
     let duration_before = histogram_count("terminal.execute.duration", &[]);
@@ -119,6 +136,7 @@ fn terminal_execute_records_ok_outcome_metric() {
 /// nonzero exit is still a successful JSON-RPC call).
 #[test]
 fn terminal_execute_records_nonzero_exit_outcome_metric() {
+    let _guard = lock_metrics();
     let labels = [Label::new("outcome", "nonzero_exit")];
     let before = counter_total("terminal.execute", &labels);
 
@@ -143,6 +161,7 @@ fn terminal_execute_records_nonzero_exit_outcome_metric() {
 /// outcome, distinct from both success and a nonzero exit.
 #[test]
 fn terminal_execute_records_timeout_outcome_metric() {
+    let _guard = lock_metrics();
     let labels = [Label::new("outcome", "timeout")];
     let before = counter_total("terminal.execute", &labels);
 
