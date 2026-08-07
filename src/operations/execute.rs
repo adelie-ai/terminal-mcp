@@ -285,7 +285,13 @@ enum ExecuteMode<'a> {
 }
 
 /// Inner execution function shared by direct command and script execution paths.
+///
+/// `skip_all` because every parameter but `detach` and `timeout_secs` is, or
+/// carries, the command line a caller supplied: `command` itself, `cwd`, and
+/// `mode` (script body / stdin / env vars). None of that may reach a span
+/// field (mcp-core#40) -- the two fields kept are config, not content.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(name = "terminal.execute", skip_all, fields(detach, timeout_secs))]
 async fn execute_inner(
     command: &str,
     cwd: Option<&str>,
@@ -298,6 +304,12 @@ async fn execute_inner(
     if command.is_empty() {
         return Err(ShellError::InvalidCommand("Command cannot be empty".to_string()).into());
     }
+
+    // Covers the subprocess itself (spawn through wait/timeout), not the
+    // upfront validation above or the allowlist/cwd checks below: those are
+    // malformed-request rejections, not execution attempts, and mcp-core's
+    // own protocol-level outcome metric already counts them.
+    let started = std::time::Instant::now();
 
     let timeout_secs = timeout_secs.unwrap_or(30);
     // `0`/`None` disables inactivity checking, leaving only the absolute cap.
@@ -367,8 +379,17 @@ async fn execute_inner(
     // whole tree on timeout (bounded mode) or fully disown it (detach mode).
     set_new_session(&mut cmd);
 
+    // `detach` is a config flag, not content -- safe to log. The command line
+    // itself is not named here or anywhere below.
+    tracing::debug!(detach, "spawning subprocess");
+
     if detach {
-        return spawn_detached(&mut cmd, command);
+        let outcome = spawn_detached(&mut cmd, command);
+        record_execution(
+            if outcome.is_ok() { "detached" } else { "error" },
+            started.elapsed(),
+        );
+        return outcome;
     }
 
     if stdin_input.is_some() {
@@ -382,6 +403,7 @@ async fn execute_inner(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
+            record_execution("error", started.elapsed());
             if e.kind() == std::io::ErrorKind::NotFound {
                 return Err(ShellError::CommandNotFound(command.to_string()).into());
             }
@@ -480,7 +502,7 @@ async fn execute_inner(
         }
     };
 
-    match outcome {
+    let result = match outcome {
         WaitOutcome::Exited(status) => {
             // Process exited on its own; collect the buffered output.
             let (stdout, stdout_truncated) = stdout_handle.await.unwrap_or_default();
@@ -523,7 +545,49 @@ async fn execute_inner(
                 inactivity_secs
             )))
         }
+    };
+
+    // The exit code and timeout flag are counts/status, not content (D10):
+    // safe at DEBUG and safe as a bounded metric label. The command line that
+    // produced them is neither logged nor labelled here.
+    match &result {
+        Ok(r) => {
+            tracing::debug!(
+                exit_code = r.exit_code,
+                timed_out = r.timed_out,
+                "subprocess finished"
+            );
+            record_execution(execution_outcome_label(r), started.elapsed());
+        }
+        Err(_) => record_execution("error", started.elapsed()),
     }
+
+    result
+}
+
+/// Classify a completed execution into the bounded outcome label
+/// [`record_execution`] uses. A nonzero exit is a normal, successful shell
+/// interaction (the JSON-RPC call itself succeeds), so it is worth telling
+/// apart from a genuine timeout -- distinct information mcp-core's own
+/// protocol-level outcome metric cannot see.
+fn execution_outcome_label(result: &ExecuteResult) -> &'static str {
+    if result.timed_out {
+        "timeout"
+    } else if result.exit_code == 0 {
+        "ok"
+    } else {
+        "nonzero_exit"
+    }
+}
+
+/// Record one execution attempt: a counter labelled by the bounded outcome,
+/// and its latency. `outcome` must always come from a fixed, small set (see
+/// [`execution_outcome_label`] and the detach/error call sites) -- never from
+/// the command, its arguments, or its output.
+fn record_execution(outcome: &'static str, elapsed: std::time::Duration) {
+    let labels = [mcp_core::telemetry::metrics::Label::new("outcome", outcome)];
+    mcp_core::telemetry::metrics::increment("terminal.execute", &labels);
+    mcp_core::telemetry::metrics::record_duration("terminal.execute.duration", elapsed, &[]);
 }
 
 /// Outcome of racing the child's exit against the two timeouts.

@@ -140,6 +140,11 @@ impl ToolRegistry {
         }
     }
 
+    // `skip_all` on every handler below: `args` (and `script_name`, where a
+    // handler takes one) carry the caller's command line, script body, stdin,
+    // or working directory, none of which may reach a span field (mcp-core#40).
+    // The tool name is already on mcp-core's own `mcp.tools.call` span.
+    #[tracing::instrument(skip_all)]
     async fn exec_terminal_execute(
         &self,
         args: &serde_json::Map<String, Value>,
@@ -243,6 +248,7 @@ impl ToolRegistry {
         execution_result_reply(&result, audit_log_file.as_deref())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_store_script(&self, args: &serde_json::Map<String, Value>) -> Result<ToolReply> {
         let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             McpError::InvalidToolParameters("Missing required parameter: name".to_string())
@@ -291,6 +297,7 @@ impl ToolRegistry {
         Ok(ToolReply::text(message))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_remove_script(&self, args: &serde_json::Map<String, Value>) -> Result<ToolReply> {
         let name = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             McpError::InvalidToolParameters("Missing required parameter: name".to_string())
@@ -307,6 +314,7 @@ impl ToolRegistry {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_list_scripts(&self) -> Result<ToolReply> {
         let list: Vec<Value> = {
             let scripts = self.scripts.read().expect("script store lock poisoned");
@@ -326,6 +334,7 @@ impl ToolRegistry {
         Ok(ToolReply::json(&Value::Array(list))?)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_dynamic_script(
         &self,
         script_name: &str,

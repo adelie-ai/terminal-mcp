@@ -18,9 +18,25 @@ shellexpand = "3.1"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+# Spans, events and metrics on this server's own execution path. Already in
+# the tree through mcp-core -> adelie-telemetry, so naming it directly adds no
+# crate.
+tracing = "0.1.44"
 
 [dev-dependencies]
 tempfile = "3.0"
+# A capturing `Layer` for the telemetry acceptance tests: they read back the
+# spans and events the execution path really produced. Already in the tree
+# through adelie-telemetry, so this adds no crate.
+tracing-subscriber = "0.3.23"
+
+[features]
+# OTLP export of traces, metrics and log records, passed through to mcp-core
+# (which passes it through to adelie-telemetry). Off by default: with it off
+# no opentelemetry crate is resolved at all, and console logging plus the
+# in-process metrics summary work unchanged. Configure with the standard
+# `OTEL_*` environment variables (see the README's Logging section).
+otel = ["mcp-core/otel"]
 
 [lints.rust]
 warnings = "deny"
