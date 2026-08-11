@@ -2,10 +2,28 @@
 
 `terminal-mcp` is a Rust MCP server that exposes shell execution tools to MCP clients (agents, editor integrations, automation runtimes).
 
-It supports both:
+## Transport
 
-- `stdio` transport for local/editor integration.
-- `websocket` transport on `/ws` for network clients.
+This server speaks the `stdio` transport, and no other. `stdio` is the default,
+so `terminal-mcp serve` needs no flag.
+
+The `websocket` and `unix` transports are refused. `terminal-mcp serve
+--transport websocket` and `terminal-mcp serve --transport unix` exit non-zero
+and print the transport to use instead. Two separate things hold the refusal:
+
+- `Cargo.toml` does not enable mcp-core's `websocket` feature, so no websocket
+  listener is compiled into the binary.
+- `server_config()` in `src/lib.rs` leaves both transports out of the server's
+  transport policy, so mcp-core rejects the request before it opens a socket.
+
+The reason is what the tools do. This server runs arbitrary shell commands as
+the user that started it. Neither listener carries authentication in this build,
+so a listening socket would give a shell to whoever can reach it. A stdio server
+has no socket: the parent process starts it and controls access to it.
+
+`terminal-mcp serve --help` lists all three transports and shows `--host` and
+`--port`, because mcp-core gives one CLI to the whole server fleet. Those two
+flags belong to the websocket transport and do nothing here.
 
 ## What the service provides
 
@@ -31,7 +49,7 @@ Set a non-empty `MCP_TERMINAL_LOG_DIR` to enable logging:
 
 ```bash
 export MCP_TERMINAL_LOG_DIR=/var/log/terminal-mcp
-terminal-mcp serve --mode stdio
+terminal-mcp serve --transport stdio
 ```
 
 When enabled:
@@ -118,13 +136,7 @@ in the journal.
 
 ```bash
 cargo build --release
-./target/release/terminal-mcp serve --mode stdio
-```
-
-WebSocket mode:
-
-```bash
-./target/release/terminal-mcp serve --mode websocket --host 0.0.0.0 --port 8080
+./target/release/terminal-mcp serve --transport stdio
 ```
 
 ## Technical documentation

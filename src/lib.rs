@@ -30,8 +30,15 @@ pub const SERVER_INSTRUCTIONS: &str = "Runs shell commands and scripts on the lo
 ///
 /// Why the settings: the dynamic script set changes at runtime
 /// (`terminal_store_script` / `terminal_remove_script`), so `listChanged` is
-/// advertised; the websocket transport is refused because terminal-mcp executes
-/// arbitrary shell and mcp-core's websocket transport is unauthenticated (MF-12).
+/// advertised; the transport policy leaves this server on stdio alone, because
+/// terminal-mcp runs arbitrary shell and neither of mcp-core's listeners carries
+/// authentication in this build (MF-12).
+///
+/// mcp-core's `EnabledTransports` already defaults to stdio alone, so neither
+/// websocket nor unix is reachable without an explicit opt-in.
+/// `without_websocket` is kept as the explicit statement of the refusal, so a
+/// later change to that default cannot open a shell to the network in silence.
+/// `tests/transport_refusals.rs` holds both refusals.
 pub fn server_config() -> ServerConfig {
     ServerConfig::new("terminal-mcp", env!("CARGO_PKG_VERSION"))
         .tools_list_changed(true)

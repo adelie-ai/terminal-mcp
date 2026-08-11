@@ -79,7 +79,8 @@ fn serve_websocket_is_refused() {
 /// documents say so.
 #[test]
 fn serve_unix_is_refused() {
-    let (status, stderr) = serve_and_capture(&["--transport", "unix", "--socket-path", "/dev/null"]);
+    let (status, stderr) =
+        serve_and_capture(&["--transport", "unix", "--socket-path", "/dev/null"]);
 
     assert!(
         !status.success(),
