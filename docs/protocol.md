@@ -38,19 +38,24 @@ On script add/remove operations, the server emits:
 
 - `notifications/tools/list_changed`
 
-## STDIO transport
+## Transports
 
-`stdio` mode supports both framing styles:
+This server serves the `stdio` transport, and no other. `stdio` is the default,
+so `terminal-mcp serve` needs no flag.
+
+`stdio` supports both framing styles:
 
 1. Newline-delimited JSON messages.
 2. `Content-Length` framed JSON-RPC messages.
 
-Framing is auto-detected from the first incoming message. Responses follow the detected framing mode.
+Framing is auto-detected from the first incoming message. Responses follow the
+detected framing mode.
 
-## WebSocket transport
-
-`websocket` mode binds to `host:port` and exposes one endpoint:
-
-- `GET /ws`
-
-Text frames are parsed as JSON-RPC requests. Responses and notifications are sent as text frames.
+mcp-core also implements a `websocket` transport and a `unix`-socket transport,
+and its shared CLI offers all three. This server refuses the other two:
+`terminal-mcp serve --transport websocket` and `terminal-mcp serve --transport
+unix` exit non-zero and print the transport to use instead. The reason is what
+the tools do. This server runs arbitrary shell commands, and neither listener
+carries authentication in this build, so a listening socket would give a shell
+to whoever can reach it. The README's Transport section records where the
+refusal is enforced.

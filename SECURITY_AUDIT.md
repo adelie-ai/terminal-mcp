@@ -1,4 +1,4 @@
-# Security Audit — terminal-mcp
+# Security Audit - terminal-mcp
 
 **Date:** 2026-03-31
 **Scope:** Terminal/shell execution MCP server
@@ -13,12 +13,12 @@ terminal-mcp executes arbitrary shell commands by design. This is inherently hig
 
 ## Medium Severity
 
-### 1. No Per-Process Resource Limits (DOWNGRADED — MEDIUM)
+### 1. No Per-Process Resource Limits (DOWNGRADED - MEDIUM)
 
 **File:** `src/operations/execute.rs`
 
 **Status:** Accepted risk (2026-03-31)
-**Rationale:** Timeouts kill runaway processes, output is capped at 10 MiB, the server refuses to run as root, and WebSocket defaults to localhost. The remaining gap is cgroup/rlimit enforcement against fork bombs or memory exhaustion in child processes. Adding `setrlimit` would require `Command::pre_exec()` (unsafe) and `rlimit` is not exposed by tokio's `Command`. Cgroup delegation requires systemd or root setup. A fork bomb can still hurt the host, but only with the current user's privileges and only until the timeout fires. Since the server assumes a trusted local client, this is acceptable.
+**Rationale:** Timeouts kill runaway processes, output is capped at 10 MiB, and the server refuses to run as root. The remaining gap is cgroup/rlimit enforcement against fork bombs or memory exhaustion in child processes. Adding `setrlimit` would require `Command::pre_exec()` (unsafe) and `rlimit` is not exposed by tokio's `Command`. Cgroup delegation requires systemd or root setup. A fork bomb can still hurt the host, but only with the current user's privileges and only until the timeout fires. Since the server assumes a trusted local client, this is acceptable.
 
 **Recommendation (defense-in-depth):** Run terminal-mcp under a systemd slice with `MemoryMax=`, `TasksMax=`, and `CPUQuota=` to restrict all spawned processes at the cgroup level.
 
@@ -26,21 +26,26 @@ terminal-mcp executes arbitrary shell commands by design. This is inherently hig
 
 ## High Severity
 
-### 2. No Authentication on Tool Calls (ACKNOWLEDGED — HIGH)
+### 2. No Authentication on Tool Calls (CLOSED - was HIGH)
 
-**File:** `src/main.rs`, `src/service.rs` (protocol/transport now in `mcp-core`)
+**File:** `src/main.rs`, `src/lib.rs`, `Cargo.toml` (protocol/transport now in `mcp-core`)
 
-**Status:** Acknowledged (2026-03-31; revisited 2026-06-08 after the mcp-core
-migration). `--help` warning retained; auth design TBD.
-**Rationale:** WebSocket mode has no authentication. Mitigated by defaulting to
-localhost (`--host 127.0.0.1`, via mcp-core's `CommonServeArgs`) and the
-`--host` help text warning that exposing it has no auth. Stdio mode (the
-default) is unaffected — the parent process controls access. The transport is
-now owned by `mcp-core`; the previous bespoke startup-time warning print is no
-longer emitted (the `--help` warning remains). Token-based auth needs design
-work before implementation.
+**Status:** Closed 2026-08-11 (acknowledged 2026-03-31; revisited 2026-06-08
+after the mcp-core migration). The finding rested on the WebSocket transport,
+which this server stopped serving on 2026-06-09 (MF-12), one day after that
+revisit.
+**Rationale:** WebSocket mode had no authentication. It was mitigated by
+defaulting to localhost (`--host 127.0.0.1`, via mcp-core's `CommonServeArgs`).
+The server now serves the `stdio` transport and no other: `Cargo.toml` does not
+enable mcp-core's `websocket` feature, and `server_config()` leaves both the
+websocket and the unix transports out of the server's transport policy. `serve
+--transport websocket` exits non-zero instead of binding a listener, which
+`tests/transport_refusals.rs` holds. No unauthenticated network path is left.
+Stdio is unaffected - the parent process starts the server and controls access
+to it.
 
-**Recommendation:** Add token-based authentication for WebSocket mode.
+**Recommendation:** Design authentication before any later change enables a
+network transport.
 
 ---
 
