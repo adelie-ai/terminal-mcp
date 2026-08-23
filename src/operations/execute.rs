@@ -956,6 +956,8 @@ mod tests {
         let pid: i32 = pid_text.trim().parse().expect("parse pid");
 
         // kill -0 returns an error (ESRCH) once the process is gone.
+        // SAFETY: signal 0 to kill() sends no signal; it only checks process existence.
+        // The pid is one this test spawned and has not yet reaped.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(
             !alive,
@@ -983,10 +985,14 @@ mod tests {
         let pid = result.detached_pid.expect("detached pid") as i32;
 
         // It should be alive right after returning.
+        // SAFETY: signal 0 to kill() sends no signal; it only checks process existence.
+        // The pid is one this test just spawned and has not yet reaped.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(alive, "detached process should be running");
 
         // Clean up: kill the detached process group.
+        // SAFETY: killpg only delivers a signal to the target process group.
+        // The pid/pgid is one this test spawned and has not yet reaped.
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
         }
